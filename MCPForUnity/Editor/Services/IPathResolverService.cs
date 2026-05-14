@@ -67,6 +67,15 @@ namespace MCPForUnity.Editor.Services
         bool HasUvxPathFallback { get; }
 
         /// <summary>
+        /// Gets whether the most recently resolved uvx path is a Windows .bat/.cmd shim
+        /// (e.g. pyenv-win's uvx.bat). Shim launchers route arguments through cmd.exe,
+        /// which corrupts shell metacharacters in uvx args such as the '>' in
+        /// mcpforunityserver&gt;=0.0.0a0, so configurators should treat shim resolution
+        /// as a fallback only and warn the user.
+        /// </summary>
+        bool ResolvedUvxIsShim { get; }
+
+        /// <summary>
         /// Validates the provided uv executable by running "--version" and parsing the output.
         /// </summary>
         /// <param name="uvPath">Absolute or relative path to the uv/uvx executable.</param>

@@ -176,19 +176,17 @@ namespace MCPForUnity.Editor.Clients.Configurators
                 {
                     throw new InvalidOperationException("uvx not found. Install uv/uvx or set the override in Advanced Settings.");
                 }
+                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
+                if (!string.IsNullOrEmpty(preflightError))
+                {
+                    throw new InvalidOperationException(preflightError);
+                }
 
                 var command = new JArray { uvxPath };
-                foreach (string value in AssetPathUtility.GetUvxDevFlagsList())
+                foreach (string value in AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: true))
                 {
                     command.Add(value);
                 }
-                foreach (string value in AssetPathUtility.GetBetaServerFromArgsList())
-                {
-                    command.Add(value);
-                }
-                command.Add(packageName);
-                command.Add("--transport");
-                command.Add("stdio");
 
                 return new JObject
                 {

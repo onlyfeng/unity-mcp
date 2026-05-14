@@ -897,10 +897,11 @@ namespace MCPForUnity.Editor.Clients
             else
             {
                 var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
+                string sysCertsArgs = AssetPathUtility.GetSystemCertsArgs();
                 string devFlags = AssetPathUtility.GetUvxDevFlags();
                 string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
                 // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664)
-                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {devFlags}{fromArgs} {packageName}";
+                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {sysCertsArgs}{devFlags}{fromArgs} {packageName}";
             }
 
             string projectDir = GetClientProjectDir();
@@ -1005,11 +1006,12 @@ namespace MCPForUnity.Editor.Clients
                 return "# Error: Configuration not available - check paths in Advanced Settings";
             }
 
+            string sysCertsArgs = AssetPathUtility.GetSystemCertsArgs();
             string devFlags = AssetPathUtility.GetUvxDevFlags();
             string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
 
             return "# Register the MCP server with Claude Code:\n" +
-                   $"claude mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {devFlags}{fromArgs} mcp-for-unity\n\n" +
+                   $"claude mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {sysCertsArgs}{devFlags}{fromArgs} mcp-for-unity\n\n" +
                    "# Unregister the MCP server (from all scopes to clean up any stale configs):\n" +
                    "claude mcp remove --scope local UnityMCP\n" +
                    "claude mcp remove --scope user UnityMCP\n" +

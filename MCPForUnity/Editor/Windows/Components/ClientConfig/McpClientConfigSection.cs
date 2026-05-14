@@ -343,6 +343,28 @@ namespace MCPForUnity.Editor.Windows.Components.ClientConfig
             bool isCurrentlyConfigured = client.Status == McpStatus.Configured;
             ApplyStatusToUi(client, showChecking: true, customMessage: isCurrentlyConfigured ? "Unregistering..." : "Configuring...");
 
+            // Preflight: refuse to register a stdio server command we already know is broken
+            // (no uvx, a Windows pyenv shim, a network/cert failure). Runs synchronously on
+            // the main thread before we spawn the background `claude mcp add` call so we
+            // never end up writing a bad config that Claude Code would try to launch later.
+            if (!isCurrentlyConfigured && !EditorConfigurationCache.Instance.UseHttpTransport)
+            {
+                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
+                if (!string.IsNullOrEmpty(preflightError))
+                {
+                    statusRefreshInFlight.Remove(client);
+                    if (client is McpClientConfiguratorBase baseConfigurator)
+                    {
+                        baseConfigurator.Client.SetStatus(McpStatus.Error, preflightError);
+                    }
+                    McpLog.Error($"Configuration failed: {preflightError}");
+                    ApplyStatusToUi(client);
+                    EditorUtility.DisplayDialog("Configuration Failed", preflightError, "OK");
+                    UpdateManualConfiguration();
+                    return;
+                }
+            }
+
             // Capture ALL main-thread-only values before async task
             string projectDir = ClaudeCliMcpConfigurator.GetClientProjectDir();
             bool useHttpTransport = EditorConfigurationCache.Instance.UseHttpTransport;
@@ -350,7 +372,9 @@ namespace MCPForUnity.Editor.Windows.Components.ClientConfig
             string httpUrl = HttpEndpointUtility.GetMcpRpcUrl();
             var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
             string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
-            string uvxDevFlags = AssetPathUtility.GetUvxDevFlags();
+            // Prepend --system-certs (when active) into the dev-flags prefix so the
+            // captured-values registration path emits the same shape as the synchronous one.
+            string uvxDevFlags = AssetPathUtility.GetSystemCertsArgs() + AssetPathUtility.GetUvxDevFlags();
             string apiKey = EditorPrefs.GetString(EditorPrefKeys.ApiKey, string.Empty);
 
             // Compute pathPrepend on main thread

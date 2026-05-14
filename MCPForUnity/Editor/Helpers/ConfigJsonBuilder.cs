@@ -106,10 +106,11 @@ namespace MCPForUnity.Editor.Helpers
             }
             else
             {
-                // Stdio mode: Use uvx command
-                var (uvxPath, fromUrl, packageName) = AssetPathUtility.GetUvxCommandParts();
+                // Stdio mode: Use uvx command. All client configurators (JSON/TOML/CLI)
+                // share the same uvx launch arg shape via AssetPathUtility.BuildUvxServerLaunchArgs.
+                var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
 
-                var toolArgs = BuildUvxArgs(fromUrl, packageName);
+                var toolArgs = AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: true);
 
                 unity["command"] = uvxPath;
                 unity["args"] = JArray.FromObject(toolArgs.ToArray());
@@ -155,30 +156,6 @@ namespace MCPForUnity.Editor.Helpers
             var created = new JObject();
             parent[name] = created;
             return created;
-        }
-
-        private static IList<string> BuildUvxArgs(string fromUrl, string packageName)
-        {
-            // Dev mode: force a fresh install/resolution (avoids stale cached builds while iterating).
-            // `--no-cache` avoids reading from cache; `--refresh` ensures metadata is revalidated.
-            // Note: --reinstall is not supported by uvx and will cause a warning.
-            // Keep ordering consistent with other uvx builders: dev flags first, then --from <url>, then package name.
-            var args = new List<string>();
-
-            foreach (var flag in AssetPathUtility.GetUvxDevFlagsList())
-                args.Add(flag);
-
-            // Use centralized helper for beta server / prerelease args
-            foreach (var arg in AssetPathUtility.GetBetaServerFromArgsList())
-            {
-                args.Add(arg);
-            }
-            args.Add(packageName);
-
-            args.Add("--transport");
-            args.Add("stdio");
-
-            return args;
         }
 
     }
