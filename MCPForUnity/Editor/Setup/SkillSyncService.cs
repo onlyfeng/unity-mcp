@@ -152,7 +152,7 @@ namespace MCPForUnity.Editor.Setup
                 return string.Empty;
             }
 
-            var trimmed = repoUrl.Trim();
+            var trimmed = StripGitPlusPrefix(repoUrl.Trim());
             var delimiterIndex = -1;
             foreach (var delimiter in new[] { '?', '#' })
             {
@@ -167,6 +167,18 @@ namespace MCPForUnity.Editor.Setup
                 ? trimmed.Substring(0, delimiterIndex)
                 : trimmed;
             return withoutPackageSelectors.TrimEnd('/');
+        }
+
+        private static string StripGitPlusPrefix(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return value;
+            }
+
+            return value.StartsWith("git+", StringComparison.OrdinalIgnoreCase)
+                ? value.Substring(4)
+                : value;
         }
 
         private static bool TryGetPackageRepoUrlFromManifest(out string repoUrl)
@@ -204,7 +216,7 @@ namespace MCPForUnity.Editor.Setup
                 return false;
             }
 
-            var trimmed = value.Trim();
+            var trimmed = StripGitPlusPrefix(value.Trim());
             if (trimmed.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
