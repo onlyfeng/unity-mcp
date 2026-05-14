@@ -29,20 +29,34 @@ namespace MCPForUnity.Editor.Dependencies.PlatformDetectors
 
             try
             {
-                // Try running python directly first (works with Windows App Execution Aliases)
-                if (TryValidatePython("python3.exe", out string version, out string fullPath) ||
-                    TryValidatePython("python.exe", out version, out fullPath))
+                // Probe order covers real binaries first, then shim variants (.bat/.cmd)
+                // used by tools like pyenv-win.
+                string[] candidates = {
+                    "python3.exe", "python.exe",
+                    "python3.bat", "python.bat",
+                    "python3.cmd", "python.cmd",
+                };
+
+                string version, fullPath;
+                foreach (string candidate in candidates)
                 {
-                    status.IsAvailable = true;
-                    status.Version = version;
-                    status.Path = fullPath;
-                    status.Details = $"Found Python {version} in PATH";
-                    return status;
+                    if (TryValidatePython(candidate, out version, out fullPath))
+                    {
+                        status.IsAvailable = true;
+                        status.Version = version;
+                        status.Path = fullPath;
+                        status.Details = $"Found Python {version} in PATH";
+                        return status;
+                    }
                 }
 
-                // Fallback: try 'where' command
-                if (TryFindInPath("python3.exe", out string pathResult) ||
-                    TryFindInPath("python.exe", out pathResult))
+                // Fallback: try 'where' command across the same extension set
+                string pathResult = null;
+                foreach (string candidate in candidates)
+                {
+                    if (TryFindInPath(candidate, out pathResult)) break;
+                }
+                if (!string.IsNullOrEmpty(pathResult))
                 {
                     if (TryValidatePython(pathResult, out version, out fullPath))
                     {
@@ -120,24 +134,32 @@ namespace MCPForUnity.Editor.Dependencies.PlatformDetectors
             {
                 string augmentedPath = BuildAugmentedPath();
 
-                // try to find uv
-                if (TryValidateUvWithPath("uv.exe", augmentedPath, out string uvVersion, out string uvPath))
+                // Probe both real binaries and shim variants (pyenv-win exposes uv.bat / uvx.bat on PATH).
+                string[] uvCandidates = { "uv.exe", "uv.bat", "uv.cmd" };
+                string[] uvxCandidates = { "uvx.exe", "uvx.bat", "uvx.cmd" };
+
+                foreach (string candidate in uvCandidates)
                 {
-                    status.IsAvailable = true;
-                    status.Version = uvVersion;
-                    status.Path = uvPath;
-                    status.Details = $"Found uv {uvVersion} at {uvPath}";
-                    return status;
+                    if (TryValidateUvWithPath(candidate, augmentedPath, out string uvVersion, out string uvPath))
+                    {
+                        status.IsAvailable = true;
+                        status.Version = uvVersion;
+                        status.Path = uvPath;
+                        status.Details = $"Found uv {uvVersion} at {uvPath}";
+                        return status;
+                    }
                 }
 
-                // try to find uvx
-                if (TryValidateUvWithPath("uvx.exe", augmentedPath, out string uvxVersion, out string uvxPath))
+                foreach (string candidate in uvxCandidates)
                 {
-                    status.IsAvailable = true;
-                    status.Version = uvxVersion;
-                    status.Path = uvxPath;
-                    status.Details = $"Found uvx {uvxVersion} at {uvxPath} (fallback)";
-                    return status;
+                    if (TryValidateUvWithPath(candidate, augmentedPath, out string uvxVersion, out string uvxPath))
+                    {
+                        status.IsAvailable = true;
+                        status.Version = uvxVersion;
+                        status.Path = uvxPath;
+                        status.Details = $"Found uvx {uvxVersion} at {uvxPath} (fallback)";
+                        return status;
+                    }
                 }
 
                 status.ErrorMessage = "uv not found in PATH";
