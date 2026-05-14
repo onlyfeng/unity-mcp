@@ -87,16 +87,15 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Probe order on Windows: all uvx variants (preferred, since our launch
-                // builders emit uvx-style "--from ... <pkg>" args) before any uv variant.
-                // .bat/.cmd shims (used by pyenv-win and similar managers) come AFTER the
-                // matching .exe so we prefer real binaries, but uvx.bat still ranks above
-                // uv.exe — picking uv.exe with uvx args would fail at preflight on hosts
-                // that have uv.exe + uvx.bat but no uvx.exe. Callers that land on uv.* via
-                // this ordering get an implicit "tool run" prefix from
-                // AssetPathUtility.BuildUvxServerLaunchArgs.
+                // Probe order on Windows: every real .exe before any .bat/.cmd shim,
+                // even across the uvx/uv family boundary. PreflightStdioServerLaunchIfNeeded
+                // now hard-rejects .bat / .cmd commands (cmd.exe corrupts the '>' in
+                // "mcpforunityserver>=0.0.0a0"), so ranking uvx.bat above uv.exe would
+                // convert a runnable "uv.exe + uvx.bat" host into a blocking error.
+                // AssetPathUtility.BuildUvxServerLaunchArgs prepends "tool run" when the
+                // resolved launcher is uv.*, so uv.exe with uvx-style args still works.
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uvx.bat", "uvx.cmd", "uv.exe", "uv.bat", "uv.cmd" }
+                    ? new[] { "uvx.exe", "uv.exe", "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)

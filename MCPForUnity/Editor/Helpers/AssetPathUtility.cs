@@ -632,10 +632,20 @@ namespace MCPForUnity.Editor.Helpers
                 if (string.IsNullOrEmpty(uvxPath))
                     return false;
 
-                string fromArgs = GetBetaServerFromArgs(quoteFromPath: false);
-                string probeArgs = string.IsNullOrEmpty(fromArgs)
-                    ? "--offline mcp-for-unity --help"
-                    : $"--offline {fromArgs} mcp-for-unity --help";
+                // Build the probe command-line through the same helpers as the real
+                // launch path so the "tool run" prefix and other launcher-aware bits
+                // stay in sync. Without that prefix, hosts where PathResolver lands
+                // on uv.exe (or a uv.* shim) would silently fail this probe and never
+                // see "--offline" enabled, even when uv's cache is already warm.
+                var args = new List<string>();
+                foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
+                    args.Add(arg);
+                args.Add("--offline");
+                foreach (string arg in GetBetaServerFromArgsList())
+                    args.Add(arg);
+                args.Add("mcp-for-unity");
+                args.Add("--help");
+                string probeArgs = string.Join(" ", args.ConvertAll(QuoteCommandLineArg));
 
                 return ExecPath.TryRun(uvxPath, probeArgs, null, out _, out _, timeoutMs: 3000);
             }

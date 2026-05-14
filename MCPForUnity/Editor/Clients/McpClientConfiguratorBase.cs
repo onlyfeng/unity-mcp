@@ -773,7 +773,7 @@ namespace MCPForUnity.Editor.Clients
         public void ConfigureWithCapturedValues(
             string projectDir, string claudePath, string pathPrepend,
             bool useHttpTransport, string httpUrl,
-            string uvxPath, string fromArgs, string packageName, string uvxDevFlags,
+            string uvxPath, string uvxLaunchArgs,
             string apiKey,
             Models.ConfiguredTransport serverTransport)
         {
@@ -784,18 +784,24 @@ namespace MCPForUnity.Editor.Clients
             else
             {
                 RegisterWithCapturedValues(projectDir, claudePath, pathPrepend,
-                    useHttpTransport, httpUrl, uvxPath, fromArgs, packageName, uvxDevFlags,
+                    useHttpTransport, httpUrl, uvxPath, uvxLaunchArgs,
                     apiKey, serverTransport);
             }
         }
 
         /// <summary>
-        /// Thread-safe registration using pre-captured values.
+        /// Thread-safe registration using pre-captured values. The caller MUST build
+        /// <paramref name="uvxLaunchArgs"/> on the main thread via
+        /// <see cref="AssetPathUtility.BuildUvxServerLaunchArgsString"/>, which includes
+        /// the implicit "tool run" prefix when the resolved launcher is uv (not uvx).
+        /// Skipping that builder here would silently drop the prefix and produce a
+        /// broken claude-code stdio registration on hosts where PathResolver lands on
+        /// uv.exe / uv.bat / uv.cmd.
         /// </summary>
         private void RegisterWithCapturedValues(
             string projectDir, string claudePath, string pathPrepend,
             bool useHttpTransport, string httpUrl,
-            string uvxPath, string fromArgs, string packageName, string uvxDevFlags,
+            string uvxPath, string uvxLaunchArgs,
             string apiKey,
             Models.ConfiguredTransport serverTransport)
         {
@@ -821,8 +827,23 @@ namespace MCPForUnity.Editor.Clients
             }
             else
             {
-                // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664)
-                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxDevFlags}{fromArgs} {packageName}";
+                // Last-line defense for background callers: refuse to register a Windows
+                // .bat/.cmd shim. The full PreflightStdioServerLaunchIfNeeded() is main-
+                // thread-only (reads EditorPrefs) and the UI caller already runs it
+                // before scheduling this Task; this thread-safe path-string check just
+                // catches any future caller that forgets that prerequisite.
+                if (McpConfigurationHelper.IsWindowsShellShimCommand(uvxPath))
+                {
+                    throw new InvalidOperationException(
+                        "Refusing to register Unity MCP with Claude Code using a Windows batch shim. " +
+                        $"Detected '{uvxPath}', which can corrupt arguments such as mcpforunityserver>=0.0.0a0. " +
+                        "Install uv so a real uvx.exe/uv.exe is available, or set the uvx path override.");
+                }
+                // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664).
+                // `uvxLaunchArgs` was produced on the main thread by BuildUvxServerLaunchArgsString and already
+                // contains the system-certs / dev-flags / --prerelease / --from / package shape, plus the
+                // implicit "tool run" prefix when the resolved launcher is uv.
+                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxLaunchArgs}";
             }
 
             // Remove any existing registrations from ALL scopes to prevent stale config conflicts (#664)
@@ -896,12 +917,25 @@ namespace MCPForUnity.Editor.Clients
             }
             else
             {
+                // Preflight the stdio launch before we let `claude mcp add` write the
+                // registration. This synchronous Register() path is reachable from
+                // non-UI flows too (CheckStatus auto-rewrite, migration), so the
+                // preflight gate cannot live only in the UI async wrapper.
+                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
+                if (!string.IsNullOrEmpty(preflightError))
+                {
+                    throw new InvalidOperationException(preflightError);
+                }
+
                 var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
-                string sysCertsArgs = AssetPathUtility.GetSystemCertsArgs();
-                string devFlags = AssetPathUtility.GetUvxDevFlags();
-                string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
+                // Use the centralized launch-arg builder so we keep the same shape
+                // (system-certs / dev-flags / --prerelease / --from / package) AND pick up
+                // the implicit "tool run" prefix when PathResolver lands on uv instead
+                // of uvx. Manual string-splicing of `--from` here previously dropped that
+                // prefix, breaking Claude Code stdio registration on uv.exe-only hosts.
+                string uvxLaunchArgs = AssetPathUtility.BuildUvxServerLaunchArgsString(packageName, includeTransportStdio: false);
                 // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664)
-                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {sysCertsArgs}{devFlags}{fromArgs} {packageName}";
+                args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxLaunchArgs}";
             }
 
             string projectDir = GetClientProjectDir();
@@ -1006,12 +1040,10 @@ namespace MCPForUnity.Editor.Clients
                 return "# Error: Configuration not available - check paths in Advanced Settings";
             }
 
-            string sysCertsArgs = AssetPathUtility.GetSystemCertsArgs();
-            string devFlags = AssetPathUtility.GetUvxDevFlags();
-            string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
+            string uvxLaunchArgs = AssetPathUtility.BuildUvxServerLaunchArgsString("mcp-for-unity", includeTransportStdio: false);
 
             return "# Register the MCP server with Claude Code:\n" +
-                   $"claude mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {sysCertsArgs}{devFlags}{fromArgs} mcp-for-unity\n\n" +
+                   $"claude mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxLaunchArgs}\n\n" +
                    "# Unregister the MCP server (from all scopes to clean up any stale configs):\n" +
                    "claude mcp remove --scope local UnityMCP\n" +
                    "claude mcp remove --scope user UnityMCP\n" +
