@@ -385,13 +385,34 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
+        /// If the resolved launcher is uv (not uvx), prepend "tool run" so the same
+        /// uvx-style args ("--from &lt;src&gt; mcp-for-unity") work — uv's top-level CLI is
+        /// "uv [OPTIONS] &lt;COMMAND&gt;", so calling "uv --from ..." directly fails. The
+        /// uvx fast path is equivalent to "uv tool run", so this restores compatibility
+        /// when PathResolver falls back to uv.exe / uv.bat / uv.cmd.
+        /// </summary>
+        private static IReadOnlyList<string> GetUvToolRunPrefixArgs(string uvxPath)
+        {
+            if (string.IsNullOrEmpty(uvxPath))
+                return Array.Empty<string>();
+
+            string fileName = Path.GetFileNameWithoutExtension(uvxPath);
+            if (string.Equals(fileName, "uv", StringComparison.OrdinalIgnoreCase))
+                return new[] { "tool", "run" };
+
+            return Array.Empty<string>();
+        }
+
+        /// <summary>
         /// Single source of truth for uvx args used to launch the MCP for Unity server.
         /// Centralizing this here ensures every client configurator (JSON, TOML, Claude CLI,
         /// OpenCode, etc.) emits an identical command shape:
         ///   <c>uvx[.exe] --system-certs [--no-cache --refresh | --offline] --prerelease explicit
         ///   --from mcpforunityserver&gt;=0.0.0a0 mcp-for-unity [--transport stdio]</c>
-        /// Per-configurator string-splicing of <c>--from</c> is forbidden; callers must use
-        /// this builder so we keep the system-certs / prerelease / dev-flags ordering consistent.
+        /// When PathResolver falls back to uv.* instead of uvx.*, a "tool run" prefix is
+        /// inserted automatically. Per-configurator string-splicing of <c>--from</c> is
+        /// forbidden; callers must use this builder so we keep the system-certs /
+        /// prerelease / dev-flags ordering consistent.
         /// MUST be called from the main thread (reads EditorPrefs).
         /// </summary>
         /// <param name="packageName">The uvx executable target (typically "mcp-for-unity").</param>
@@ -399,6 +420,9 @@ namespace MCPForUnity.Editor.Helpers
         public static List<string> BuildUvxServerLaunchArgs(string packageName, bool includeTransportStdio)
         {
             var args = new List<string>();
+            string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
+            foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
+                args.Add(arg);
             foreach (string flag in GetSystemCertsArgsList())
                 args.Add(flag);
             foreach (string flag in GetUvxDevFlagsList())

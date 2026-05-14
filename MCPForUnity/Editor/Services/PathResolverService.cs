@@ -87,12 +87,16 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Probe order on Windows: real .exe binaries first for BOTH uvx and uv,
-                // then .bat/.cmd shims (used by pyenv-win and similar managers) as a last
-                // resort. Writing a .bat shim into an MCP client config corrupts args that
-                // contain shell metacharacters such as "mcpforunityserver>=0.0.0a0".
+                // Probe order on Windows: all uvx variants (preferred, since our launch
+                // builders emit uvx-style "--from ... <pkg>" args) before any uv variant.
+                // .bat/.cmd shims (used by pyenv-win and similar managers) come AFTER the
+                // matching .exe so we prefer real binaries, but uvx.bat still ranks above
+                // uv.exe — picking uv.exe with uvx args would fail at preflight on hosts
+                // that have uv.exe + uvx.bat but no uvx.exe. Callers that land on uv.* via
+                // this ordering get an implicit "tool run" prefix from
+                // AssetPathUtility.BuildUvxServerLaunchArgs.
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uv.exe", "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" }
+                    ? new[] { "uvx.exe", "uvx.bat", "uvx.cmd", "uv.exe", "uv.bat", "uv.cmd" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)
