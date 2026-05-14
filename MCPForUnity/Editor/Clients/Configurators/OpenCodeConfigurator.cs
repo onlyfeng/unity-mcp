@@ -126,6 +126,17 @@ namespace MCPForUnity.Editor.Clients.Configurators
                 string path = GetConfigPath();
                 McpConfigurationHelper.EnsureConfigDirectoryExists(path);
 
+                // Preflight the stdio launch BEFORE any disk write. Only runs for stdio
+                // transport; HTTP is a no-op. Kept here (not in BuildServerEntry) so that
+                // GetManualSnippet() stays a pure function — copying the command should
+                // never trigger a 60s subprocess/network probe or fail on transient errors.
+                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
+                if (!string.IsNullOrEmpty(preflightError))
+                {
+                    client.SetStatus(McpStatus.Error, preflightError);
+                    return;
+                }
+
                 // Load existing config or start fresh, preserving all other properties and MCP servers
                 var config = TryLoadConfig(path) ?? new JObject();
 
@@ -175,11 +186,6 @@ namespace MCPForUnity.Editor.Clients.Configurators
                 if (string.IsNullOrWhiteSpace(uvxPath))
                 {
                     throw new InvalidOperationException("uvx not found. Install uv/uvx or set the override in Advanced Settings.");
-                }
-                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
-                if (!string.IsNullOrEmpty(preflightError))
-                {
-                    throw new InvalidOperationException(preflightError);
                 }
 
                 var command = new JArray { uvxPath };

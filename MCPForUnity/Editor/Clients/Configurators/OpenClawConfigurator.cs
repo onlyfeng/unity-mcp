@@ -104,6 +104,16 @@ namespace MCPForUnity.Editor.Clients.Configurators
             if (EditorPrefs.GetBool(EditorPrefKeys.LockCursorConfig, false))
                 return;
 
+            // Preflight stdio uvx launch before touching disk. Same rationale as the
+            // other configurators: do it in the write path only, not in BuildUnityServerEntry
+            // (which is also called from GetManualSnippet for copy-only flows).
+            string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
+            if (!string.IsNullOrEmpty(preflightError))
+            {
+                client.SetStatus(McpStatus.Error, preflightError);
+                return;
+            }
+
             string path = GetConfigPath();
             McpConfigurationHelper.EnsureConfigDirectoryExists(path);
 
@@ -281,17 +291,10 @@ namespace MCPForUnity.Editor.Clients.Configurators
                 }
 
                 var args = new JArray();
-                foreach (string value in AssetPathUtility.GetUvxDevFlagsList())
+                foreach (string value in AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: true))
                 {
                     args.Add(value);
                 }
-                foreach (string value in AssetPathUtility.GetBetaServerFromArgsList())
-                {
-                    args.Add(value);
-                }
-                args.Add(packageName);
-                args.Add("--transport");
-                args.Add("stdio");
 
                 return new JObject
                 {
