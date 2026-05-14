@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     # Avoid running when the workflow's own automation merges the PR
     # created by this workflow (prevents a version-bump loop).
-    if: github.actor != 'github-actions[bot]'
+    if: github.repository == 'CoplayDev/unity-mcp' && github.actor != 'github-actions[bot]'
     permissions:
       contents: write
       pull-requests: write
@@ -144,7 +144,7 @@ jobs:
     name: Publish beta to PyPI (pre-release)
     runs-on: ubuntu-latest
     # Avoid double-publish when the bot merges the version bump PR
-    if: github.actor != 'github-actions[bot]'
+    if: github.repository == 'CoplayDev/unity-mcp' && github.actor != 'github-actions[bot]'
     environment:
       name: pypi
       url: https://pypi.org/p/mcpforunityserver
