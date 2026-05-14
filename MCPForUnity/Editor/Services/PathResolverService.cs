@@ -66,9 +66,10 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Try uvx first, then uv
+                // Probe order: uvx first (preferred), then uv. On Windows, also probe .bat/.cmd
+                // shims (used by pyenv-win and similar managers).
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uv.exe" }
+                    ? new[] { "uvx.exe", "uvx.bat", "uvx.cmd", "uv.exe", "uv.bat", "uv.cmd" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)
@@ -165,13 +166,24 @@ namespace MCPForUnity.Editor.Services
 
         public bool IsPythonDetected()
         {
-            return ExecPath.TryRun(
-                RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "python.exe" : "python3",
-                "--version",
-                null,
-                out _,
-                out _,
-                2000);
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                return ExecPath.TryRun("python3", "--version", null, out _, out _, 2000);
+            }
+
+            // Windows: try real binaries first, then shim variants (.bat/.cmd) used by pyenv-win.
+            foreach (string candidate in new[] {
+                "python.exe", "python3.exe",
+                "python.bat", "python3.bat",
+                "python.cmd", "python3.cmd"
+            })
+            {
+                if (ExecPath.TryRun(candidate, "--version", null, out _, out _, 2000))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         public bool IsClaudeCliDetected()
@@ -287,12 +299,26 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Generic search for any command in PATH and common locations
-                foreach (string candidate in EnumerateCommandCandidates(commandName))
+                // On Windows, a bare command name like "uvx" may resolve to .exe, .bat, or .cmd
+                // (pyenv-win publishes .bat shims on PATH). Probe each variant in turn.
+                IEnumerable<string> namesToProbe;
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName))
                 {
-                    if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
+                    namesToProbe = new[] { commandName + ".exe", commandName + ".bat", commandName + ".cmd" };
+                }
+                else
+                {
+                    namesToProbe = new[] { commandName };
+                }
+
+                foreach (string name in namesToProbe)
+                {
+                    foreach (string candidate in EnumerateCommandCandidates(name))
                     {
-                        return candidate;
+                        if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
+                        {
+                            return candidate;
+                        }
                     }
                 }
             }
@@ -304,13 +330,26 @@ namespace MCPForUnity.Editor.Services
             return null;
         }
 
+        private static bool HasExecutableExtension(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            string ext = Path.GetExtension(name);
+            if (string.IsNullOrEmpty(ext)) return false;
+            return ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".bat", StringComparison.OrdinalIgnoreCase) ||
+                   ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase);
+        }
+
         /// <summary>
         /// Enumerates candidate paths for a generic command name.
         /// Searches PATH and common locations.
         /// </summary>
         private static IEnumerable<string> EnumerateCommandCandidates(string commandName)
         {
-            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !commandName.EndsWith(".exe")
+            // On Windows, only append ".exe" when no executable extension is present.
+            // Previously this also appended ".exe" to names like "uvx.bat", producing
+            // bogus probes such as "uvx.bat.exe".
+            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName)
                 ? commandName + ".exe"
                 : commandName;
 

@@ -176,16 +176,40 @@ namespace MCPForUnity.Editor.Helpers
             stderr = string.Empty;
             try
             {
+                bool isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
                 // Handle PowerShell scripts on Windows by invoking through powershell.exe
-                bool isPs1 = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) &&
-                             file.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
+                bool isPs1 = isWindows && file.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase);
+                // .bat/.cmd shims (e.g. pyenv-win's python.bat) cannot be launched directly
+                // by ProcessStartInfo when UseShellExecute=false in Mono; route through cmd.exe.
+                bool isBatch = isWindows &&
+                               (file.EndsWith(".bat", StringComparison.OrdinalIgnoreCase) ||
+                                file.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase));
+
+                string fileName;
+                string arguments;
+                if (isPs1)
+                {
+                    fileName = "powershell.exe";
+                    arguments = $"-NoProfile -ExecutionPolicy Bypass -File \"{file}\" {args}".Trim();
+                }
+                else if (isBatch)
+                {
+                    fileName = "cmd.exe";
+                    // cmd /c "<batch> <args>" — outer quotes are stripped by cmd when the
+                    // string both starts and ends with a quote, leaving a callable command line.
+                    string trimmedArgs = string.IsNullOrEmpty(args) ? string.Empty : " " + args;
+                    arguments = $"/c \"\"{file}\"{trimmedArgs}\"";
+                }
+                else
+                {
+                    fileName = file;
+                    arguments = args;
+                }
 
                 var psi = new ProcessStartInfo
                 {
-                    FileName = isPs1 ? "powershell.exe" : file,
-                    Arguments = isPs1
-                        ? $"-NoProfile -ExecutionPolicy Bypass -File \"{file}\" {args}".Trim()
-                        : args,
+                    FileName = fileName,
+                    Arguments = arguments,
                     WorkingDirectory = string.IsNullOrEmpty(workingDir) ? Environment.CurrentDirectory : workingDir,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
