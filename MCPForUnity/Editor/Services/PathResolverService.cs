@@ -17,15 +17,33 @@ namespace MCPForUnity.Editor.Services
     public class PathResolverService : IPathResolverService
     {
         private bool _hasUvxPathFallback;
+        private bool _resolvedUvxIsShim;
 
         public bool HasUvxPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.UvxPathOverride, null));
         public bool HasClaudeCliPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.ClaudeCliPathOverride, null));
         public bool HasUvxPathFallback => _hasUvxPathFallback;
+        public bool ResolvedUvxIsShim => _resolvedUvxIsShim;
+
+        /// <summary>
+        /// Returns true if a path points to a Windows .bat/.cmd shim (e.g. pyenv-win's
+        /// uvx.bat / uv.cmd). Shim launchers route arguments through cmd.exe, which
+        /// interprets shell metacharacters in our args — most notably the '>' in
+        /// "mcpforunityserver&gt;=0.0.0a0" is parsed as stdout redirection, leaving uvx
+        /// with a bare "--from" and no value. Configurators should emit real .exe paths
+        /// in client configs and treat shim resolution as a fallback only.
+        /// </summary>
+        public static bool IsShimPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            return path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
+        }
 
         public string GetUvxPath()
         {
-            // Reset fallback flag at the start of each resolution
+            // Reset transient flags at the start of each resolution
             _hasUvxPathFallback = false;
+            _resolvedUvxIsShim = false;
 
             // Check override first - only validate if explicitly set
             if (HasUvxPathOverride)
@@ -34,6 +52,7 @@ namespace MCPForUnity.Editor.Services
                 // Validate the override - if invalid, fall back to system discovery
                 if (TryValidateUvxExecutable(overridePath, out string version))
                 {
+                    _resolvedUvxIsShim = IsShimPath(overridePath);
                     return overridePath;
                 }
                 // Override is set but invalid - fall back to system discovery
@@ -41,16 +60,18 @@ namespace MCPForUnity.Editor.Services
                 if (!string.IsNullOrEmpty(fallbackPath))
                 {
                     _hasUvxPathFallback = true;
+                    _resolvedUvxIsShim = IsShimPath(fallbackPath);
                     return fallbackPath;
                 }
                 // Return null to indicate override is invalid and no system fallback found
                 return null;
             }
 
-            // No override set - try discovery (uvx first, then uv)
+            // No override set - try discovery (uvx.exe before uvx.bat/.cmd, then uv variants)
             string discovered = ResolveUvxFromSystem();
             if (!string.IsNullOrEmpty(discovered))
             {
+                _resolvedUvxIsShim = IsShimPath(discovered);
                 return discovered;
             }
 
@@ -66,10 +87,15 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Probe order: uvx first (preferred), then uv. On Windows, also probe .bat/.cmd
-                // shims (used by pyenv-win and similar managers).
+                // Probe order on Windows: every real .exe before any .bat/.cmd shim,
+                // even across the uvx/uv family boundary. PreflightStdioServerLaunchIfNeeded
+                // now hard-rejects .bat / .cmd commands (cmd.exe corrupts the '>' in
+                // "mcpforunityserver>=0.0.0a0"), so ranking uvx.bat above uv.exe would
+                // convert a runnable "uv.exe + uvx.bat" host into a blocking error.
+                // AssetPathUtility.BuildUvxServerLaunchArgs prepends "tool run" when the
+                // resolved launcher is uv.*, so uv.exe with uvx-style args still works.
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uvx.bat", "uvx.cmd", "uv.exe", "uv.bat", "uv.cmd" }
+                    ? new[] { "uvx.exe", "uv.exe", "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)

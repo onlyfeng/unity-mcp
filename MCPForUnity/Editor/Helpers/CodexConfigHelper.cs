@@ -17,11 +17,14 @@ namespace MCPForUnity.Editor.Helpers
     /// </summary>
     public static class CodexConfigHelper
     {
-        private static void AddUvxModeFlags(TomlArray args)
+        private static void AppendStdioLaunchArgs(TomlArray args, string packageName)
         {
             if (args == null) return;
-            foreach (var flag in AssetPathUtility.GetUvxDevFlagsList())
-                args.Add(new TomlString { Value = flag });
+            // Route everything through the centralized builder so Codex emits exactly
+            // the same uvx command shape (system-certs / dev-flags / prerelease / --from)
+            // as ConfigJsonBuilder, OpenCodeConfigurator, and the Claude CLI path.
+            foreach (string arg in AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: true))
+                args.Add(new TomlString { Value = arg });
         }
 
         public static string BuildCodexServerBlock(string uvPath)
@@ -50,15 +53,7 @@ namespace MCPForUnity.Editor.Helpers
                 unityMCP["command"] = uvxPath;
 
                 var args = new TomlArray();
-                AddUvxModeFlags(args);
-                // Use centralized helper for beta server / prerelease args
-                foreach (var arg in AssetPathUtility.GetBetaServerFromArgsList())
-                {
-                    args.Add(new TomlString { Value = arg });
-                }
-                args.Add(new TomlString { Value = packageName });
-                args.Add(new TomlString { Value = "--transport" });
-                args.Add(new TomlString { Value = "stdio" });
+                AppendStdioLaunchArgs(args, packageName);
 
                 unityMCP["args"] = args;
 
@@ -202,15 +197,7 @@ namespace MCPForUnity.Editor.Helpers
                 unityMCP["command"] = new TomlString { Value = uvxPath };
 
                 var argsArray = new TomlArray();
-                AddUvxModeFlags(argsArray);
-                // Use centralized helper for beta server / prerelease args
-                foreach (var arg in AssetPathUtility.GetBetaServerFromArgsList())
-                {
-                    argsArray.Add(new TomlString { Value = arg });
-                }
-                argsArray.Add(new TomlString { Value = packageName });
-                argsArray.Add(new TomlString { Value = "--transport" });
-                argsArray.Add(new TomlString { Value = "stdio" });
+                AppendStdioLaunchArgs(argsArray, packageName);
                 unityMCP["args"] = argsArray;
 
                 // Add Windows-specific environment configuration for stdio mode

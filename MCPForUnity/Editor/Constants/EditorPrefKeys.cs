@@ -24,6 +24,17 @@ namespace MCPForUnity.Editor.Constants
         internal const string ClaudeCliPathOverride = "MCPForUnity.ClaudeCliPath";
         internal const string ClientProjectDirOverride = "MCPForUnity.ClientProjectDir";
 
+        /// <summary>
+        /// Tri-state preference controlling whether emitted uvx commands include
+        /// <c>--system-certs</c>. Values:
+        ///   "auto"   - append when a corporate-CA environment variable is detected
+        ///              (SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
+        ///              NODE_EXTRA_CA_CERTS). This is the default.
+        ///   "always" - always append.
+        ///   "never"  - never append.
+        /// </summary>
+        internal const string UseSystemCertificates = "MCPForUnity.UseSystemCertificates";
+
         internal const string HttpBaseUrl = "MCPForUnity.HttpUrl";
         internal const string HttpRemoteBaseUrl = "MCPForUnity.HttpRemoteUrl";
         internal const string SessionId = "MCPForUnity.SessionId";

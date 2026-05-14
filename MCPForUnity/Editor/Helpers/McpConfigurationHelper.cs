@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -99,6 +100,17 @@ namespace MCPForUnity.Editor.Helpers
             string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
             if (uvxPath == null) return "uv package manager not found. Please install uv first.";
 
+            bool clientSupportsHttp = mcpClient?.SupportsHttpTransport != false;
+            bool willWriteStdio = !(clientSupportsHttp && EditorConfigurationCache.Instance.UseHttpTransport);
+            string preflightError = PreflightStdioServerLaunchIfNeeded(willWriteStdio);
+            if (!string.IsNullOrEmpty(preflightError))
+                return preflightError;
+
+            // Preserve any prior pyenv-shim command before overwriting. Preflight already
+            // refused to write a NEW shim, so reaching this point means we are upgrading
+            // a stale uvx.bat / uv.cmd registration to a real uvx.exe.
+            BackupStaleClientConfigIfNeeded(configPath, existingCommand);
+
             // Ensure containers exist and write back configuration
             JObject existingRoot;
             if (existingConfig is JObject eo)
@@ -155,6 +167,12 @@ namespace MCPForUnity.Editor.Helpers
                 return "uv package manager not found. Please install uv first.";
             }
 
+            string preflightError = PreflightStdioServerLaunchIfNeeded();
+            if (!string.IsNullOrEmpty(preflightError))
+                return preflightError;
+
+            BackupStaleClientConfigIfNeeded(configPath, existingCommand);
+
             string updatedToml = CodexConfigHelper.UpsertCodexServerBlock(existingToml, uvxPath);
 
             EnsureConfigDirectoryExists(configPath);
@@ -207,6 +225,106 @@ namespace MCPForUnity.Editor.Helpers
                 }
             }
             return null;
+        }
+
+        /// <summary>
+        /// Returns true if <paramref name="command"/> looks like a Windows shell shim
+        /// (uvx.bat / uvx.cmd / uv.bat / uv.cmd) — these route arguments through cmd.exe
+        /// and break shell metacharacters in our args (most notably the '>' in
+        /// "mcpforunityserver&gt;=0.0.0a0", which gets parsed as redirection).
+        /// </summary>
+        public static bool IsWindowsShellShimCommand(string command)
+        {
+            if (string.IsNullOrWhiteSpace(command))
+                return false;
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                return false;
+
+            string fileName = Path.GetFileName(command.Trim().Trim('"'));
+            return fileName.Equals("uvx.bat", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.Equals("uvx.cmd", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.Equals("uv.bat", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.Equals("uv.cmd", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Convenience overload that infers whether we'll write stdio from the current
+        /// HTTP/stdio transport preference.
+        /// </summary>
+        public static string PreflightStdioServerLaunchIfNeeded()
+        {
+            return PreflightStdioServerLaunchIfNeeded(
+                HttpEndpointUtility.GetCurrentServerTransport() == ConfiguredTransport.Stdio);
+        }
+
+        /// <summary>
+        /// Runs a fast probe before writing a stdio MCP client config:
+        ///   1. uvx must resolve to a real executable (not a Windows .bat/.cmd shim).
+        ///   2. <c>uvx ... mcp-for-unity --help</c> must succeed within the timeout.
+        /// Returns null on success or a human-readable error string on failure. Callers
+        /// should refuse to write the client config and surface the message to the user.
+        /// Auto-skips when the target transport is HTTP (nothing to probe).
+        /// MUST be called from the main thread (reads EditorPrefs).
+        /// </summary>
+        public static string PreflightStdioServerLaunchIfNeeded(bool useStdio)
+        {
+            if (!useStdio)
+                return null;
+
+            var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
+            if (string.IsNullOrWhiteSpace(uvxPath))
+                return "uvx not found. Install uv/uvx or set the override in Advanced Settings.";
+
+            if (IsWindowsShellShimCommand(uvxPath))
+            {
+                return "Refusing to write Unity MCP stdio config with a Windows batch shim. " +
+                       $"Detected '{uvxPath}', which can corrupt arguments such as mcpforunityserver>=0.0.0a0. " +
+                       "Install uv so a real uvx.exe/uv.exe is available, or set the uvx path override to the real executable.";
+            }
+
+            var args = new List<string>(AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: false))
+            {
+                "--help"
+            };
+            string argsString = string.Join(" ", args.ConvertAll(AssetPathUtility.QuoteCommandLineArg));
+
+            if (ExecPath.TryRun(uvxPath, argsString, null, out _, out string stderr, timeoutMs: 60000))
+                return null;
+
+            string detail = string.IsNullOrWhiteSpace(stderr) ? string.Empty : $"\n{stderr.Trim()}";
+            return "Unity MCP server command preflight failed. Check uv/uvx, network access, " +
+                   "package source, and certificate settings (try enabling Use System Certificates " +
+                   "if you are behind a corporate proxy)." + detail;
+        }
+
+        /// <summary>
+        /// If <paramref name="staleCommand"/> looks like a stale Windows shell shim
+        /// command (uvx.bat / uv.cmd), copies the existing config at
+        /// <paramref name="configPath"/> to a permanent, timestamped backup before the
+        /// caller overwrites it. Lets users roll back without preserving a backup on every
+        /// write. Safe to call when nothing is stale (no-op).
+        /// </summary>
+        public static void BackupStaleClientConfigIfNeeded(string configPath, string staleCommand)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(configPath) || !File.Exists(configPath))
+                    return;
+
+                if (!IsWindowsShellShimCommand(staleCommand))
+                    return;
+
+                string stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
+                string backupPath = $"{configPath}.staleshim-bak.{stamp}";
+                File.Copy(configPath, backupPath, overwrite: false);
+                McpLog.Info(
+                    $"Detected stale uvx shim command '{staleCommand}' in '{configPath}'. " +
+                    $"Saved a permanent backup at '{backupPath}' before rewriting.");
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"Failed to back up stale client config '{configPath}': {ex.Message}");
+            }
         }
 
         public static bool PathsEqual(string a, string b)

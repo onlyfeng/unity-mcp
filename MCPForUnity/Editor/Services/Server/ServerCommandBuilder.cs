@@ -39,26 +39,35 @@ namespace MCPForUnity.Editor.Services.Server
                 return false;
             }
 
-            var (uvxPath, fromUrl, packageName) = AssetPathUtility.GetUvxCommandParts();
+            var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
             if (string.IsNullOrEmpty(uvxPath))
             {
                 error = "uv is not installed or found in PATH. Install it or set an override in Advanced Settings.";
                 return false;
             }
 
-            string devFlags = AssetPathUtility.GetUvxDevFlags();
             bool projectScopedTools = EditorPrefs.GetBool(
                 EditorPrefKeys.ProjectScopedToolsLocalHttp,
                 true
             );
-            string scopedFlag = projectScopedTools ? " --project-scoped-tools" : string.Empty;
 
-            // Use centralized helper for beta server / prerelease args
-            string fromArgs = AssetPathUtility.GetBetaServerFromArgs(quoteFromPath: true);
+            // Reuse the centralized uvx launch builder (system-certs / dev-flags / --from /
+            // package) then append the HTTP-specific suffix. Pass every arg through
+            // QuoteCommandLineArg so we are safe whether uvxPath is a real .exe or a
+            // pyenv-win .bat shim — cmd.exe would otherwise interpret '>' in
+            // "mcpforunityserver>=0.0.0a0" as stdout redirection.
+            var argsList = new System.Collections.Generic.List<string>(
+                AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: false))
+            {
+                "--transport",
+                "http",
+                "--http-url",
+                httpUrl,
+            };
+            if (projectScopedTools)
+                argsList.Add("--project-scoped-tools");
 
-            string args = string.IsNullOrEmpty(fromArgs)
-                ? $"{devFlags}{packageName} --transport http --http-url {httpUrl}{scopedFlag}"
-                : $"{devFlags}{fromArgs} {packageName} --transport http --http-url {httpUrl}{scopedFlag}";
+            string args = string.Join(" ", argsList.ConvertAll(AssetPathUtility.QuoteCommandLineArg));
 
             fileName = uvxPath;
             arguments = args;

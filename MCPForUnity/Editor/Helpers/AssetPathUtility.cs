@@ -318,6 +318,155 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
+        /// Environment variables commonly set by corporate / Zscaler / Netskope style
+        /// proxies and by python tooling running behind a custom CA chain. When any of
+        /// these is non-empty we treat the host as needing <c>uvx --system-certs</c>
+        /// so PyPI fetches honour the OS certificate store instead of uv's bundled roots.
+        /// </summary>
+        private static readonly string[] SystemCertEnvVars = new[]
+        {
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+        };
+
+        /// <summary>
+        /// Returns true if generated uvx commands should include the <c>--system-certs</c>
+        /// flag. Driven by the <see cref="EditorPrefKeys.UseSystemCertificates"/> tri-state
+        /// preference; defaults to "auto" which auto-detects a corporate CA environment.
+        /// MUST be called from the main thread (reads EditorPrefs).
+        /// </summary>
+        public static bool ShouldUseSystemCerts()
+        {
+            string mode = "auto";
+            try { mode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, "auto"); } catch { }
+            return ShouldUseSystemCerts(mode);
+        }
+
+        /// <summary>
+        /// Thread-safe overload. Pass a pre-captured tri-state value ("auto"/"always"/"never").
+        /// </summary>
+        public static bool ShouldUseSystemCerts(string mode)
+        {
+            if (string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            foreach (string name in SystemCertEnvVars)
+            {
+                try
+                {
+                    string value = Environment.GetEnvironmentVariable(name);
+                    if (!string.IsNullOrEmpty(value))
+                        return true;
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Returns the uvx system-cert flag arguments as a list. Empty when disabled.
+        /// </summary>
+        public static IReadOnlyList<string> GetSystemCertsArgsList()
+        {
+            return ShouldUseSystemCerts() ? new[] { "--system-certs" } : Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// Returns the uvx system-cert flag as a trailing-space string, suitable for
+        /// concatenation into command-line builders (mirrors <see cref="GetUvxDevFlags()"/>).
+        /// </summary>
+        public static string GetSystemCertsArgs()
+        {
+            return ShouldUseSystemCerts() ? "--system-certs " : string.Empty;
+        }
+
+        /// <summary>
+        /// If the resolved launcher is uv (not uvx), prepend "tool run" so the same
+        /// uvx-style args ("--from &lt;src&gt; mcp-for-unity") work — uv's top-level CLI is
+        /// "uv [OPTIONS] &lt;COMMAND&gt;", so calling "uv --from ..." directly fails. The
+        /// uvx fast path is equivalent to "uv tool run", so this restores compatibility
+        /// when PathResolver falls back to uv.exe / uv.bat / uv.cmd.
+        /// </summary>
+        private static IReadOnlyList<string> GetUvToolRunPrefixArgs(string uvxPath)
+        {
+            if (string.IsNullOrEmpty(uvxPath))
+                return Array.Empty<string>();
+
+            string fileName = Path.GetFileNameWithoutExtension(uvxPath);
+            if (string.Equals(fileName, "uv", StringComparison.OrdinalIgnoreCase))
+                return new[] { "tool", "run" };
+
+            return Array.Empty<string>();
+        }
+
+        /// <summary>
+        /// Single source of truth for uvx args used to launch the MCP for Unity server.
+        /// Centralizing this here ensures every client configurator (JSON, TOML, Claude CLI,
+        /// OpenCode, etc.) emits an identical command shape:
+        ///   <c>uvx[.exe] --system-certs [--no-cache --refresh | --offline] --prerelease explicit
+        ///   --from mcpforunityserver&gt;=0.0.0a0 mcp-for-unity [--transport stdio]</c>
+        /// When PathResolver falls back to uv.* instead of uvx.*, a "tool run" prefix is
+        /// inserted automatically. Per-configurator string-splicing of <c>--from</c> is
+        /// forbidden; callers must use this builder so we keep the system-certs /
+        /// prerelease / dev-flags ordering consistent.
+        /// MUST be called from the main thread (reads EditorPrefs).
+        /// </summary>
+        /// <param name="packageName">The uvx executable target (typically "mcp-for-unity").</param>
+        /// <param name="includeTransportStdio">When true, appends "--transport stdio".</param>
+        public static List<string> BuildUvxServerLaunchArgs(string packageName, bool includeTransportStdio)
+        {
+            var args = new List<string>();
+            string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
+            foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
+                args.Add(arg);
+            foreach (string flag in GetSystemCertsArgsList())
+                args.Add(flag);
+            foreach (string flag in GetUvxDevFlagsList())
+                args.Add(flag);
+            foreach (string arg in GetBetaServerFromArgsList())
+                args.Add(arg);
+            args.Add(packageName);
+            if (includeTransportStdio)
+            {
+                args.Add("--transport");
+                args.Add("stdio");
+            }
+            return args;
+        }
+
+        /// <summary>
+        /// Same as <see cref="BuildUvxServerLaunchArgs"/> but returns the joined,
+        /// shell-quoted command-line string suitable for splicing after the uvx path.
+        /// </summary>
+        public static string BuildUvxServerLaunchArgsString(string packageName, bool includeTransportStdio)
+        {
+            return string.Join(" ", BuildUvxServerLaunchArgs(packageName, includeTransportStdio)
+                .ConvertAll(QuoteCommandLineArg));
+        }
+
+        /// <summary>
+        /// Shell-safe quoting for a single command-line argument. Required when the
+        /// argument may flow through cmd.exe via a .bat/.cmd shim, because shell
+        /// metacharacters such as <c>&gt; &amp; |</c> in <c>mcpforunityserver&gt;=0.0.0a0</c>
+        /// would otherwise be interpreted as redirection/pipe operators.
+        /// </summary>
+        internal static string QuoteCommandLineArg(string arg)
+        {
+            if (string.IsNullOrEmpty(arg))
+                return "\"\"";
+
+            bool needsQuotes = arg.IndexOfAny(new[] { ' ', '\t', '"', '<', '>', '&', '|', '^' }) >= 0;
+            if (!needsQuotes)
+                return arg;
+
+            return "\"" + arg.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+        }
+
+        /// <summary>
         /// Builds the uvx package source arguments for the MCP server.
         /// Handles prerelease package mode (prerelease from PyPI) vs stable mode (pinned version or override).
         /// Centralizes the prerelease logic to avoid duplication between HTTP and stdio transports.
@@ -483,10 +632,20 @@ namespace MCPForUnity.Editor.Helpers
                 if (string.IsNullOrEmpty(uvxPath))
                     return false;
 
-                string fromArgs = GetBetaServerFromArgs(quoteFromPath: false);
-                string probeArgs = string.IsNullOrEmpty(fromArgs)
-                    ? "--offline mcp-for-unity --help"
-                    : $"--offline {fromArgs} mcp-for-unity --help";
+                // Build the probe command-line through the same helpers as the real
+                // launch path so the "tool run" prefix and other launcher-aware bits
+                // stay in sync. Without that prefix, hosts where PathResolver lands
+                // on uv.exe (or a uv.* shim) would silently fail this probe and never
+                // see "--offline" enabled, even when uv's cache is already warm.
+                var args = new List<string>();
+                foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
+                    args.Add(arg);
+                args.Add("--offline");
+                foreach (string arg in GetBetaServerFromArgsList())
+                    args.Add(arg);
+                args.Add("mcp-for-unity");
+                args.Add("--help");
+                string probeArgs = string.Join(" ", args.ConvertAll(QuoteCommandLineArg));
 
                 return ExecPath.TryRun(uvxPath, probeArgs, null, out _, out _, timeoutMs: 3000);
             }
