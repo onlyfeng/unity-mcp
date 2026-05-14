@@ -216,7 +216,13 @@ namespace MCPForUnity.Editor.Setup
                 return false;
             }
 
-            var trimmed = StripGitPlusPrefix(value.Trim());
+            var trimmed = value.Trim();
+            var hadGitPlusPrefix = trimmed.StartsWith("git+", StringComparison.OrdinalIgnoreCase);
+            if (hadGitPlusPrefix)
+            {
+                trimmed = trimmed.Substring(4);
+            }
+
             if (trimmed.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
@@ -228,10 +234,18 @@ namespace MCPForUnity.Editor.Setup
             }
 
             if (string.Equals(uri.Scheme, "git", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(uri.Scheme, "ssh", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(uri.Scheme, "file", StringComparison.OrdinalIgnoreCase))
+                string.Equals(uri.Scheme, "ssh", StringComparison.OrdinalIgnoreCase))
             {
                 return true;
+            }
+
+            var pathEndsWithDotGit = uri.AbsolutePath.EndsWith(".git", StringComparison.OrdinalIgnoreCase);
+
+            if (string.Equals(uri.Scheme, "file", StringComparison.OrdinalIgnoreCase))
+            {
+                // Unity manifests also use bare `file:` URIs for local folder dependencies;
+                // only treat them as git when explicitly marked via `git+` or pointing at a `.git` path.
+                return hadGitPlusPrefix || pathEndsWithDotGit;
             }
 
             if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) &&
@@ -240,7 +254,12 @@ namespace MCPForUnity.Editor.Setup
                 return false;
             }
 
-            return uri.AbsolutePath.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ||
+            if (hadGitPlusPrefix)
+            {
+                return true;
+            }
+
+            return pathEndsWithDotGit ||
                    uri.Host.IndexOf("github", StringComparison.OrdinalIgnoreCase) >= 0 ||
                    uri.Host.IndexOf("gitlab", StringComparison.OrdinalIgnoreCase) >= 0;
         }
