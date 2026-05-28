@@ -17,8 +17,10 @@ namespace MCPForUnity.Editor.Setup
     {
         private const string DefaultRepoUrl = "https://github.com/CoplayDev/unity-mcp";
         private const string PackageName = "com.coplaydev.unity-mcp";
-        private const string SkillSubdir = ".claude/skills/unity-mcp-skill";
-        private const string FallbackSkillSubdir = "unity-mcp-skill";
+        // Prefer the top-level canonical skill source; the repo's dogfooding copy under
+        // .claude/skills can drift (fewer reference files, stale SKILL.md) and is only a fallback.
+        private const string SkillSubdir = "unity-mcp-skill";
+        private const string FallbackSkillSubdir = ".claude/skills/unity-mcp-skill";
         private const string SyncOwnershipMarker = ".unity-mcp-skill-sync";
         private const string LastSyncedCommitKeyPrefix = "UnityMcpSkillSync.LastSyncedCommit";
 
