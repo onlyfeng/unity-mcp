@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
 _MAX_CACHED_TEST_JOBS = 20
 _test_job_status_cache: dict[str, dict[str, Any]] = {}
+_TERMINAL_TEST_JOB_STATUSES = ("succeeded", "failed", "cancelled")
+
+
+def _cached_terminal_test_job_response(job_id: str) -> dict[str, Any] | None:
+    """Return a clean success response if a terminal snapshot is cached for the
+    job. Terminal jobs are final (they never go back to running), so a caller
+    that hit a transport stall need not wait out wait_timeout to learn the
+    result; the cached status is authoritative."""
+    cached = _test_job_status_cache.get(job_id)
+    if not cached or cached.get("status") not in _TERMINAL_TEST_JOB_STATUSES:
+        return None
+    return {"success": True, "data": dict(cached)}
 
 
 def _remember_test_job_data(data: Any) -> None:
@@ -340,7 +352,7 @@ async def get_test_job(
                 data = response.get("data", {})
                 _remember_test_job_data(data)
                 status = data.get("status", "")
-                if status in ("succeeded", "failed", "cancelled"):
+                if status in _TERMINAL_TEST_JOB_STATUSES:
                     return GetTestJobResponse(**response)
 
                 # Detect progress and reset exponential backoff
@@ -375,6 +387,14 @@ async def get_test_job(
                     if nudged:
                         logger.info(f"Test job {job_id} nudge completed")
 
+            # A transport stall can't change a job that already finished: if we
+            # cached a terminal snapshot, return it now instead of waiting out
+            # the timeout.
+            if transient_error is not None:
+                terminal = _cached_terminal_test_job_response(job_id)
+                if terminal is not None:
+                    return GetTestJobResponse(**terminal)
+
             # Check timeout
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
@@ -396,12 +416,18 @@ async def get_test_job(
     # No wait_timeout - return immediately (original behavior)
     response = await _fetch_status()
     if not isinstance(response, dict):
+        terminal = _cached_terminal_test_job_response(job_id)
+        if terminal is not None:
+            return GetTestJobResponse(**terminal)
         cached = _cached_test_job_response(job_id, response)
         if cached:
             return GetTestJobResponse(**cached)
         return MCPResponse(success=False, error=str(response))
     if not response.get("success", True):
         if _is_retryable_transport_failure(response):
+            terminal = _cached_terminal_test_job_response(job_id)
+            if terminal is not None:
+                return GetTestJobResponse(**terminal)
             cached = _cached_test_job_response(job_id, response.get("error"))
             if cached:
                 return GetTestJobResponse(**cached)

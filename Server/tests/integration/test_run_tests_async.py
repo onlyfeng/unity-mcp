@@ -286,3 +286,46 @@ async def test_get_test_job_unity_side_command_timeout_is_retryable(monkeypatch)
     assert resp.data.status == "running"
     assert resp.data.transport_degraded is True
     assert "timed out after" in resp.data.transport_error
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_wait_returns_cached_terminal_without_waiting(monkeypatch):
+    """If a terminal snapshot is already cached, a later transient poll must
+    return it immediately rather than blocking until wait_timeout expires."""
+    from services.tools.run_tests import get_test_job
+
+    sleeps = []
+
+    async def _record_sleep(seconds):
+        sleeps.append(seconds)
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        # First poll reports terminal; a subsequent poll hits a transport stall.
+        if not poll["seen_terminal"]:
+            poll["seen_terminal"] = True
+            return {"success": True, "data": {"job_id": "job-done", "status": "succeeded", "mode": "EditMode"}}
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    poll = {"seen_terminal": False}
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    monkeypatch.setattr(mod.asyncio, "sleep", _record_sleep)
+
+    # First call caches the terminal snapshot (returns succeeded).
+    first = await get_test_job(DummyContext(), job_id="job-done")
+    assert first.data.status == "succeeded"
+
+    # Second call with a long wait hits a transient stall but must return the
+    # cached terminal status immediately, never sleeping.
+    resp = await get_test_job(DummyContext(), job_id="job-done", wait_timeout=60)
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.status == "succeeded"
+    assert resp.data.transport_degraded is None
+    assert resp.hint is None
+    assert sleeps == []  # returned without waiting out the timeout
