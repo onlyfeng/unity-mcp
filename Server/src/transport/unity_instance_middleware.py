@@ -333,9 +333,24 @@ class UnityInstanceMiddleware(Middleware):
         from transport.unity_transport import _resolve_user_id_from_request
         return await _resolve_user_id_from_request()
 
+    @staticmethod
+    def _command_name_from_context(context: MiddlewareContext) -> str | None:
+        message = getattr(context, "message", None)
+        for attr in ("name", "tool_name", "command"):
+            value = getattr(message, attr, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        if isinstance(message, dict):
+            for key in ("name", "tool_name", "command"):
+                value = message.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
     async def _inject_unity_instance(self, context: MiddlewareContext) -> None:
         """Inject active Unity instance and user_id into context if available."""
         ctx = context.fastmcp_context
+        command_name = self._command_name_from_context(context)
 
         # Resolve user_id from the HTTP request's API key header
         user_id = await self._resolve_user_id()
@@ -381,7 +396,16 @@ class UnityInstanceMiddleware(Middleware):
                     # We only need session_id for HTTP transport routing.
                     # For stdio, we just need the instance ID.
                     # Pass user_id for remote-hosted mode session isolation
-                    session_id = await PluginHub._resolve_session_id(active_instance, user_id=user_id)
+                    resolve_max_wait_s = (
+                        PluginHub.FAST_FAIL_TIMEOUT
+                        if command_name in PluginHub._FAST_FAIL_COMMANDS
+                        else None
+                    )
+                    session_id = await PluginHub._resolve_session_id(
+                        active_instance,
+                        user_id=user_id,
+                        resolve_max_wait_s=resolve_max_wait_s,
+                    )
                 except (ConnectionError, ValueError, KeyError, TimeoutError) as exc:
                     # If resolution fails, it means the Unity instance is not reachable via HTTP/WS.
                     # If we are in stdio mode, this might still be fine if the user is just setting state?

@@ -289,6 +289,62 @@ class TestUnityInstanceMiddlewareInjection:
         assert len(calls) == 0
 
     @pytest.mark.asyncio
+    async def test_middleware_caps_fast_fail_tool_session_resolution(self, mock_context, monkeypatch):
+        """
+        Current behavior: HTTP middleware pre-resolution applies the same short
+        session-resolution cap for fast-fail tools (e.g. get_test_job) that
+        PluginHub.send_command_for_instance uses later.
+        """
+        middleware = UnityInstanceMiddleware()
+        await middleware.set_active_instance(mock_context, "Project@abc123")
+        middleware_ctx = Mock()
+        middleware_ctx.fastmcp_context = mock_context
+        middleware_ctx.message = SimpleNamespace(name="get_test_job", arguments={})
+
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen["resolve_max_wait_s"] = resolve_max_wait_s
+            return "session-1"
+
+        monkeypatch.setattr(config, "transport_mode", "http")
+        monkeypatch.setattr(config, "http_remote_hosted", False)
+        monkeypatch.setattr(PluginHub, "is_configured", lambda: True)
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+
+        await middleware._inject_unity_instance(middleware_ctx)
+
+        assert seen["resolve_max_wait_s"] == PluginHub.FAST_FAIL_TIMEOUT
+        mock_context.set_state.assert_any_call("unity_session_id", "session-1")
+
+    @pytest.mark.asyncio
+    async def test_middleware_keeps_default_session_resolution_for_normal_tools(self, mock_context, monkeypatch):
+        """
+        Current behavior: non-fast-fail tools keep the default session-resolution
+        wait, so normal tool calls still tolerate longer reload windows.
+        """
+        middleware = UnityInstanceMiddleware()
+        await middleware.set_active_instance(mock_context, "Project@abc123")
+        middleware_ctx = Mock()
+        middleware_ctx.fastmcp_context = mock_context
+        middleware_ctx.message = SimpleNamespace(name="manage_scene", arguments={})
+
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen["resolve_max_wait_s"] = resolve_max_wait_s
+            return "session-1"
+
+        monkeypatch.setattr(config, "transport_mode", "http")
+        monkeypatch.setattr(config, "http_remote_hosted", False)
+        monkeypatch.setattr(PluginHub, "is_configured", lambda: True)
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+
+        await middleware._inject_unity_instance(middleware_ctx)
+
+        assert seen["resolve_max_wait_s"] is None
+
+    @pytest.mark.asyncio
     async def test_list_tools_filters_disabled_unity_tools_and_aliases(self, mock_context, monkeypatch):
         """
         Current behavior: in HTTP mode with a connected Unity session, on_list_tools()
@@ -1062,7 +1118,89 @@ class TestPluginHubCommandRouting:
         assert "ping" in PluginHub._FAST_FAIL_COMMANDS
         assert "read_console" in PluginHub._FAST_FAIL_COMMANDS
         assert "get_editor_state" in PluginHub._FAST_FAIL_COMMANDS
+        assert "get_test_job" in PluginHub._FAST_FAIL_COMMANDS
         assert PluginHub.FAST_FAIL_TIMEOUT == 2.0
+        # get_test_job is a high-frequency poll: it keeps the 2s fast-fail timeout
+        # but is exempt from the up-to-6s readiness probe so polling stays responsive.
+        assert "get_test_job" in PluginHub._PROBE_EXEMPT_COMMANDS
+        assert "ping" in PluginHub._PROBE_EXEMPT_COMMANDS
+        assert "read_console" not in PluginHub._PROBE_EXEMPT_COMMANDS
+
+    @pytest.mark.asyncio
+    async def test_get_test_job_skips_readiness_probe(self, monkeypatch):
+        """get_test_job must not be routed through the bounded ping readiness
+        probe; doing so would block each poll for up to the probe timeout."""
+        calls = []
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            calls.append(command_type)
+            if command_type == "ping":
+                return {"status": "success", "result": {"message": "pong"}}
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("inst", "get_test_job", {})
+        assert calls == ["get_test_job"]  # no preceding ping probe
+
+    @pytest.mark.asyncio
+    async def test_read_console_still_uses_readiness_probe(self, monkeypatch):
+        """Other fast-fail commands keep the readiness probe (ping before send)."""
+        calls = []
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            calls.append(command_type)
+            if command_type == "ping":
+                return {"status": "success", "result": {"message": "pong"}}
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("inst", "read_console", {})
+        assert calls == ["ping", "read_console"]  # probe runs before the real send
+
+    @pytest.mark.asyncio
+    async def test_fast_fail_commands_cap_session_resolution_wait(self, monkeypatch):
+        """Fast-fail commands must bound the session-resolution reload wait to the
+        fast-fail timeout, so a get_test_job poll can't block for the full 20s
+        reload window. Non-fast-fail commands keep the unbounded (None) wait."""
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen[unity_instance] = resolve_max_wait_s
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("fast", "get_test_job", {})
+        await PluginHub.send_command_for_instance("slow", "manage_scene", {})
+
+        assert seen["fast"] == PluginHub.FAST_FAIL_TIMEOUT
+        assert seen["slow"] is None
 
     @pytest.mark.asyncio
     async def test_send_command_respects_requested_timeout(self, configured_plugin_hub):

@@ -23,6 +23,154 @@ logger = logging.getLogger(__name__)
 
 # Strong references to background fire-and-forget tasks to prevent premature GC.
 _background_tasks: set[asyncio.Task] = set()
+_MAX_CACHED_TEST_JOBS = 20
+# Each entry: {"data": <snapshot>, "details": bool, "failed": bool} where the
+# flags record the detail level the snapshot was fetched with (include_details /
+# include_failed_tests). They change Unity's serialized payload, so a low-detail
+# snapshot must not be served as authoritative for a higher-detail poll.
+_test_job_status_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_TERMINAL_TEST_JOB_STATUSES = ("succeeded", "failed", "cancelled")
+
+
+async def _get_test_job_cache_scope(ctx: Context, unity_instance: str | None) -> str:
+    get_state_fn = getattr(ctx, "get_state", None)
+
+    async def _state_value(key: str) -> str | None:
+        if not callable(get_state_fn):
+            return None
+        try:
+            value = await get_state_fn(key)
+        except Exception:
+            return None
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    user_id = await _state_value("user_id")
+    instance = (unity_instance or "").strip()
+    if user_id and instance:
+        return f"user:{user_id}|instance:{instance}"
+    if instance:
+        return f"instance:{instance}"
+    if user_id:
+        return f"user:{user_id}|instance:default"
+    return "default"
+
+
+def _detail_satisfies(cached_details: bool, cached_failed: bool,
+                      want_details: bool, want_failed: bool) -> bool:
+    """Whether a snapshot fetched with the given detail flags carries enough
+    data to answer a poll requesting want_details/want_failed. include_details
+    (all results) is a superset of include_failed_tests (failed/skipped only)."""
+    if want_details and not cached_details:
+        return False
+    if want_failed and not (cached_failed or cached_details):
+        return False
+    return True
+
+
+def _cached_terminal_test_job_response(
+    cache_scope: str, job_id: str, *, include_details: bool = False, include_failed_tests: bool = False
+) -> dict[str, Any] | None:
+    """Return a clean success response if a terminal snapshot is cached for the
+    job AND it was fetched with enough detail to satisfy this poll. Terminal
+    jobs are final (they never go back to running), so a caller that hit a
+    transport stall need not wait out wait_timeout to learn the result; the
+    cached status is authoritative. A less-detailed snapshot is not, so we fall
+    through to the degraded/retry path when more detail was requested."""
+    entry = _test_job_status_cache.get((cache_scope, job_id))
+    if not entry:
+        return None
+    snapshot = entry["data"]
+    if snapshot.get("status") not in _TERMINAL_TEST_JOB_STATUSES:
+        return None
+    if not _detail_satisfies(entry["details"], entry["failed"],
+                             include_details, include_failed_tests):
+        return None
+    return {"success": True, "data": dict(snapshot)}
+
+
+def _remember_test_job_data(
+    cache_scope: str, data: Any, *, include_details: bool = False, include_failed_tests: bool = False
+) -> None:
+    if not isinstance(data, dict):
+        return
+
+    job_id = data.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return
+
+    entry = {
+        "data": dict(data),
+        "details": bool(include_details),
+        "failed": bool(include_failed_tests),
+    }
+
+    # A terminal job's results are final, so a richer terminal snapshot must not
+    # be clobbered by a later lower-detail poll of the same job — otherwise a
+    # subsequent high-detail request would lose results we already had.
+    cache_key = (cache_scope, job_id)
+    existing = _test_job_status_cache.get(cache_key)
+    if (existing is not None
+            and existing["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
+            and entry["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
+            and not _detail_satisfies(entry["details"], entry["failed"],
+                                      existing["details"], existing["failed"])):
+        # Keep the richer snapshot, but refresh its recency so the protection
+        # isn't quietly undone by LRU eviction on a later poll.
+        _test_job_status_cache[cache_key] = _test_job_status_cache.pop(cache_key)
+        return
+
+    _test_job_status_cache.pop(cache_key, None)
+    _test_job_status_cache[cache_key] = entry
+
+    while len(_test_job_status_cache) > _MAX_CACHED_TEST_JOBS:
+        oldest = next(iter(_test_job_status_cache), None)
+        if oldest is None:
+            break
+        _test_job_status_cache.pop(oldest, None)
+
+
+def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
+    """True when a success=False response is a transient transport/timeout
+    failure that is safe to mask with a cached snapshot, rather than a real
+    tool error like an invalid/expired job id."""
+    if response.get("hint") == "retry":
+        return True
+    error = str(response.get("error") or "").lower()
+    # "did not respond" -> server-side fast-fail timeout (plugin_hub).
+    # "timed out after" -> Unity accepted the execute message but the dispatcher
+    #   did not finish within the command timeout while the Editor was busy
+    #   (WebSocketTransportClient.HandleExecuteAsync); normalized to success=False
+    #   with no hint, so match it explicitly.
+    return "did not respond" in error or "timed out after" in error
+
+
+def _cached_test_job_response(
+    cache_scope: str, job_id: str, error: Any, *, include_details: bool = False, include_failed_tests: bool = False
+) -> dict[str, Any] | None:
+    entry = _test_job_status_cache.get((cache_scope, job_id))
+    if not entry:
+        return None
+
+    # A terminal snapshot that lacks the requested detail must not be served as a
+    # (degraded) terminal result: the caller would see a done status without the
+    # results it asked for. Fall through so it gets a plain retry instead.
+    if (entry["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
+            and not _detail_satisfies(entry["details"], entry["failed"],
+                                      include_details, include_failed_tests)):
+        return None
+
+    data = dict(entry["data"])
+    data["transport_degraded"] = True
+    data["transport_error"] = str(error) if error else "Unity did not respond while polling test job"
+    return {
+        "success": True,
+        "message": "Returning cached test job status; Unity did not respond to the latest poll.",
+        "hint": "retry",
+        "data": data,
+    }
 
 
 async def _get_unity_project_path(unity_instance: str | None) -> str | None:
@@ -137,6 +285,8 @@ class GetTestJobData(BaseModel):
     progress: TestJobProgress | None = None
     error: str | None = None
     result: RunTestsResult | None = None
+    transport_degraded: bool | None = None
+    transport_error: str | None = None
 
 
 class GetTestJobResponse(MCPResponse):
@@ -175,6 +325,7 @@ async def run_tests(
         return MCPResponse(success=False, error="init_timeout must be a positive integer (milliseconds) or None")
 
     unity_instance = await get_unity_instance_from_context(ctx)
+    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
 
     gate = await preflight(ctx, requires_no_tests=True, wait_for_no_compile=True, refresh_if_dirty=True)
     if isinstance(gate, MCPResponse):
@@ -216,6 +367,12 @@ async def run_tests(
     if isinstance(response, dict):
         if not response.get("success", True):
             return MCPResponse(**response)
+        _remember_test_job_data(
+            cache_scope,
+            response.get("data"),
+            include_details=include_details,
+            include_failed_tests=include_failed_tests,
+        )
         return RunTestsStartResponse(**response)
     return MCPResponse(success=False, error=str(response))
 
@@ -241,6 +398,7 @@ async def get_test_job(
                             "Recommended: 30-60 seconds. Returns immediately if tests complete sooner."] = None,
 ) -> GetTestJobResponse | MCPResponse:
     unity_instance = await get_unity_instance_from_context(ctx)
+    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
 
     params: dict[str, Any] = {"job_id": job_id}
     if include_failed_tests:
@@ -268,53 +426,81 @@ async def get_test_job(
         while True:
             response = await _fetch_status()
 
+            # Transient transport failures must not bounce a caller that asked
+            # the server to wait. Treat them as "no fresh data this round" and
+            # keep polling until a terminal status or the deadline; only then
+            # fall back to the cached snapshot. Real tool errors surface now.
+            transient_error: Any = None
             if not isinstance(response, dict):
-                return MCPResponse(success=False, error=str(response))
+                transient_error = response
+            elif not response.get("success", True):
+                if _is_retryable_transport_failure(response):
+                    transient_error = response.get("error")
+                else:
+                    return MCPResponse(**response)
+            else:
+                # Check if tests are done
+                data = response.get("data", {})
+                _remember_test_job_data(
+                    cache_scope, data, include_details=include_details, include_failed_tests=include_failed_tests)
+                status = data.get("status", "")
+                if status in _TERMINAL_TEST_JOB_STATUSES:
+                    return GetTestJobResponse(**response)
 
-            if not response.get("success", True):
-                return MCPResponse(**response)
+                # Detect progress and reset exponential backoff
+                last_update_unix_ms = data.get("last_update_unix_ms")
+                if prev_last_update_unix_ms is not None and last_update_unix_ms != prev_last_update_unix_ms:
+                    # Progress detected - reset exponential backoff for next potential stall
+                    reset_nudge_backoff()
+                    logger.debug(f"Test job {job_id} made progress - reset nudge backoff")
+                prev_last_update_unix_ms = last_update_unix_ms
 
-            # Check if tests are done
-            data = response.get("data", {})
-            status = data.get("status", "")
-            if status in ("succeeded", "failed", "cancelled"):
-                return GetTestJobResponse(**response)
+                # Check if Unity needs a focus nudge to make progress
+                # This handles OS-level throttling (e.g., macOS App Nap) that can
+                # stall PlayMode tests when Unity is in the background.
+                # Uses exponential backoff: 1s, 2s, 4s, 8s, 10s max between nudges.
+                progress = data.get("progress") or {}
+                editor_is_focused = progress.get("editor_is_focused", True)
+                current_time_ms = int(time.time() * 1000)
 
-            # Detect progress and reset exponential backoff
-            last_update_unix_ms = data.get("last_update_unix_ms")
-            if prev_last_update_unix_ms is not None and last_update_unix_ms != prev_last_update_unix_ms:
-                # Progress detected - reset exponential backoff for next potential stall
-                reset_nudge_backoff()
-                logger.debug(f"Test job {job_id} made progress - reset nudge backoff")
-            prev_last_update_unix_ms = last_update_unix_ms
+                if should_nudge(
+                    status=status,
+                    editor_is_focused=editor_is_focused,
+                    last_update_unix_ms=last_update_unix_ms,
+                    current_time_ms=current_time_ms,
+                    # Use default stall_threshold_ms (3s)
+                ):
+                    logger.info(f"Test job {job_id} appears stalled (unfocused Unity), attempting nudge...")
+                    # Lazily resolve project path if not yet available (registry may have become ready)
+                    if project_path is None:
+                        project_path = await _get_unity_project_path(unity_instance)
+                    # Pass project path for multi-instance support
+                    nudged = await nudge_unity_focus(unity_project_path=project_path)
+                    if nudged:
+                        logger.info(f"Test job {job_id} nudge completed")
 
-            # Check if Unity needs a focus nudge to make progress
-            # This handles OS-level throttling (e.g., macOS App Nap) that can
-            # stall PlayMode tests when Unity is in the background.
-            # Uses exponential backoff: 1s, 2s, 4s, 8s, 10s max between nudges.
-            progress = data.get("progress") or {}
-            editor_is_focused = progress.get("editor_is_focused", True)
-            current_time_ms = int(time.time() * 1000)
-
-            if should_nudge(
-                status=status,
-                editor_is_focused=editor_is_focused,
-                last_update_unix_ms=last_update_unix_ms,
-                current_time_ms=current_time_ms,
-                # Use default stall_threshold_ms (3s)
-            ):
-                logger.info(f"Test job {job_id} appears stalled (unfocused Unity), attempting nudge...")
-                # Lazily resolve project path if not yet available (registry may have become ready)
-                if project_path is None:
-                    project_path = await _get_unity_project_path(unity_instance)
-                # Pass project path for multi-instance support
-                nudged = await nudge_unity_focus(unity_project_path=project_path)
-                if nudged:
-                    logger.info(f"Test job {job_id} nudge completed")
+            # A transport stall can't change a job that already finished: if we
+            # cached a terminal snapshot, return it now instead of waiting out
+            # the timeout.
+            if transient_error is not None:
+                terminal = _cached_terminal_test_job_response(
+                    cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+                if terminal is not None:
+                    return GetTestJobResponse(**terminal)
 
             # Check timeout
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
+                if transient_error is not None:
+                    # Deadline hit while Unity was unreachable - serve the last
+                    # known snapshot (degraded) if we have one, else the error.
+                    cached = _cached_test_job_response(
+                        cache_scope, job_id, transient_error, include_details=include_details, include_failed_tests=include_failed_tests)
+                    if cached:
+                        return GetTestJobResponse(**cached)
+                    if isinstance(response, dict):
+                        return MCPResponse(**response)
+                    return MCPResponse(success=False, error=str(response))
                 # Timeout reached, return current status
                 return GetTestJobResponse(**response)
 
@@ -324,14 +510,33 @@ async def get_test_job(
     # No wait_timeout - return immediately (original behavior)
     response = await _fetch_status()
     if not isinstance(response, dict):
+        terminal = _cached_terminal_test_job_response(
+            cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+        if terminal is not None:
+            return GetTestJobResponse(**terminal)
+        cached = _cached_test_job_response(
+            cache_scope, job_id, response, include_details=include_details, include_failed_tests=include_failed_tests)
+        if cached:
+            return GetTestJobResponse(**cached)
         return MCPResponse(success=False, error=str(response))
     if not response.get("success", True):
+        if _is_retryable_transport_failure(response):
+            terminal = _cached_terminal_test_job_response(
+                cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+            if terminal is not None:
+                return GetTestJobResponse(**terminal)
+            cached = _cached_test_job_response(
+                cache_scope, job_id, response.get("error"), include_details=include_details, include_failed_tests=include_failed_tests)
+            if cached:
+                return GetTestJobResponse(**cached)
         return MCPResponse(**response)
 
     # Fire-and-forget nudge check: even without wait_timeout, clients may poll
     # externally. Check if Unity needs a nudge on every call so stalls get
     # detected regardless of polling style.
     data = response.get("data", {})
+    _remember_test_job_data(
+        cache_scope, data, include_details=include_details, include_failed_tests=include_failed_tests)
     status = data.get("status", "")
     if status == "running":
         progress = data.get("progress") or {}

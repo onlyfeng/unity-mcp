@@ -98,14 +98,20 @@ class PluginHub(WebSocketEndpoint):
     PING_INTERVAL = 10
     # Max time (seconds) to wait for pong before considering connection dead
     PING_TIMEOUT = 20
-    # Timeout (seconds) for fast-fail commands like ping/read_console/get_editor_state.
+    # Timeout (seconds) for fast-fail commands like ping/read_console/get_editor_state/get_test_job.
     # Keep short so MCP clients aren't blocked during Unity compilation/reload/unfocused throttling.
     FAST_FAIL_TIMEOUT = 2.0
     # Fast-path commands should never block the client for long; return a retry hint instead.
     # This helps avoid the Cursor-side ~30s tool-call timeout when Unity is compiling/reloading
     # or is throttled while unfocused.
     _FAST_FAIL_COMMANDS: set[str] = {
-        "read_console", "get_editor_state", "ping"}
+        "read_console", "get_editor_state", "get_test_job", "ping"}
+    # Fast-path commands that skip the bounded readiness probe (the up-to-6s
+    # main-thread ping wait before sending). ping is the probe itself; get_test_job
+    # is a high-frequency poll whose caller (run_tests) already tolerates transient
+    # failures via cache + wait-loop retry, so routing it through the probe would
+    # defeat its fast-fail responsiveness.
+    _PROBE_EXEMPT_COMMANDS: set[str] = {"ping", "get_test_job"}
 
     _registry: PluginRegistry | None = None
     _mcp: FastMCP | None = None
@@ -827,6 +833,7 @@ class PluginHub(WebSocketEndpoint):
         unity_instance: str | None,
         user_id: str | None = None,
         retry_on_reload: bool = True,
+        resolve_max_wait_s: float | None = None,
     ) -> str:
         """Resolve a project hash (Unity instance id) to an active plugin session.
 
@@ -867,6 +874,11 @@ class PluginHub(WebSocketEndpoint):
             max_wait_s = 20.0
         # Clamp to [0, 20] to prevent misconfiguration from causing excessive waits
         max_wait_s = max(0.0, min(max_wait_s, 20.0))
+        # Fast-fail commands (e.g. get_test_job polls) honor a much shorter cap so
+        # they don't block for the full reload wait, which would violate their
+        # fast-fail contract and stall responsive polling during domain reloads.
+        if resolve_max_wait_s is not None:
+            max_wait_s = min(max_wait_s, max(0.0, resolve_max_wait_s))
         if not retry_on_reload:
             max_wait_s = 0.0
         retry_ms = float(getattr(config, "reload_retry_ms", 250))
@@ -975,11 +987,18 @@ class PluginHub(WebSocketEndpoint):
             user_id: User ID for session isolation in remote-hosted mode
             retry_on_reload: If False, do not wait for session reconnect on reload.
         """
+        # Fast-fail commands must not block for the full reload wait during
+        # session resolution; cap it to the fast-fail timeout so polling stays
+        # responsive (the readiness probe is already bounded/exempt separately).
+        resolve_max_wait_s = (
+            cls.FAST_FAIL_TIMEOUT if command_type in cls._FAST_FAIL_COMMANDS else None
+        )
         try:
             session_id = await cls._resolve_session_id(
                 unity_instance,
                 user_id=user_id,
                 retry_on_reload=retry_on_reload,
+                resolve_max_wait_s=resolve_max_wait_s,
             )
         except NoUnitySessionError:
             logger.debug(
@@ -997,6 +1016,7 @@ class PluginHub(WebSocketEndpoint):
                     unity_instance,
                     user_id=user_id,
                     retry_on_reload=True,
+                    resolve_max_wait_s=resolve_max_wait_s,
                 )
             except NoUnitySessionError:
                 return cls._unavailable_retry_response("no_unity_session")
@@ -1008,7 +1028,7 @@ class PluginHub(WebSocketEndpoint):
         # the Unity Editor is unfocused). For fast-path commands, we do a bounded readiness probe using
         # a main-thread ping command (handled by TransportCommandDispatcher) rather than waiting on
         # register_tools (which can be delayed by EditorApplication.delayCall).
-        if retry_on_reload and command_type in cls._FAST_FAIL_COMMANDS and command_type != "ping":
+        if retry_on_reload and command_type in cls._FAST_FAIL_COMMANDS and command_type not in cls._PROBE_EXEMPT_COMMANDS:
             try:
                 max_wait_s = float(os.environ.get(
                     "UNITY_MCP_SESSION_READY_WAIT_SECONDS", "6"))
