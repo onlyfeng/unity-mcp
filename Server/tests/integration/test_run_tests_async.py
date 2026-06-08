@@ -461,10 +461,55 @@ async def test_protected_terminal_snapshot_refreshes_lru_recency(monkeypatch):
     # A: high-detail terminal, then B: terminal -> cache order [A, B]
     await get_test_job(DummyContext(), job_id="A", include_details=True)
     await get_test_job(DummyContext(), job_id="B", include_details=True)
-    assert list(mod._test_job_status_cache) == ["A", "B"]
+    assert list(mod._test_job_status_cache) == [("default", "A"), ("default", "B")]
 
     # Low-detail poll of A must not clobber its richer snapshot, and must move it
     # to the most-recent position -> [B, A].
     await get_test_job(DummyContext(), job_id="A")
-    assert list(mod._test_job_status_cache) == ["B", "A"]
-    assert mod._test_job_status_cache["A"]["details"] is True  # richer snapshot kept
+    assert list(mod._test_job_status_cache) == [("default", "B"), ("default", "A")]
+    assert mod._test_job_status_cache[("default", "A")]["details"] is True  # richer snapshot kept
+
+
+@pytest.mark.asyncio
+async def test_cached_test_jobs_are_scoped_by_unity_instance(monkeypatch):
+    """A retryable failure for one Unity instance must not serve another
+    instance's cached payload just because the job_id matches."""
+    from services.tools.run_tests import get_test_job
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if unity_instance == "ProjectA@aaaa":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": params["job_id"],
+                    "status": "running",
+                    "mode": "EditMode",
+                    "instance": "A",
+                },
+            }
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    ctx_a = DummyContext()
+    await ctx_a.set_state("unity_instance", "ProjectA@aaaa")
+    ctx_b = DummyContext()
+    await ctx_b.set_state("unity_instance", "ProjectB@bbbb")
+
+    first = await get_test_job(ctx_a, job_id="same-job")
+    assert first.success is True
+    assert first.data is not None
+    assert first.data.status == "running"
+
+    second = await get_test_job(ctx_b, job_id="same-job")
+    assert second.success is False
+    assert second.hint == "retry"
+    assert second.data is None

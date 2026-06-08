@@ -28,8 +28,38 @@ _MAX_CACHED_TEST_JOBS = 20
 # flags record the detail level the snapshot was fetched with (include_details /
 # include_failed_tests). They change Unity's serialized payload, so a low-detail
 # snapshot must not be served as authoritative for a higher-detail poll.
-_test_job_status_cache: dict[str, dict[str, Any]] = {}
+_test_job_status_cache: dict[tuple[str, str], dict[str, Any]] = {}
 _TERMINAL_TEST_JOB_STATUSES = ("succeeded", "failed", "cancelled")
+
+
+async def _get_test_job_cache_scope(ctx: Context, unity_instance: str | None) -> str:
+    get_state_fn = getattr(ctx, "get_state", None)
+
+    async def _state_value(key: str) -> str | None:
+        if not callable(get_state_fn):
+            return None
+        try:
+            value = await get_state_fn(key)
+        except Exception:
+            return None
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    session_id = await _state_value("unity_session_id")
+    if session_id:
+        return f"session:{session_id}"
+
+    user_id = await _state_value("user_id")
+    instance = (unity_instance or "").strip()
+    if user_id and instance:
+        return f"user:{user_id}|instance:{instance}"
+    if instance:
+        return f"instance:{instance}"
+    if user_id:
+        return f"user:{user_id}|instance:default"
+    return "default"
 
 
 def _detail_satisfies(cached_details: bool, cached_failed: bool,
@@ -45,7 +75,7 @@ def _detail_satisfies(cached_details: bool, cached_failed: bool,
 
 
 def _cached_terminal_test_job_response(
-    job_id: str, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: str, job_id: str, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> dict[str, Any] | None:
     """Return a clean success response if a terminal snapshot is cached for the
     job AND it was fetched with enough detail to satisfy this poll. Terminal
@@ -53,7 +83,7 @@ def _cached_terminal_test_job_response(
     transport stall need not wait out wait_timeout to learn the result; the
     cached status is authoritative. A less-detailed snapshot is not, so we fall
     through to the degraded/retry path when more detail was requested."""
-    entry = _test_job_status_cache.get(job_id)
+    entry = _test_job_status_cache.get((cache_scope, job_id))
     if not entry:
         return None
     snapshot = entry["data"]
@@ -66,7 +96,7 @@ def _cached_terminal_test_job_response(
 
 
 def _remember_test_job_data(
-    data: Any, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: str, data: Any, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> None:
     if not isinstance(data, dict):
         return
@@ -84,7 +114,8 @@ def _remember_test_job_data(
     # A terminal job's results are final, so a richer terminal snapshot must not
     # be clobbered by a later lower-detail poll of the same job — otherwise a
     # subsequent high-detail request would lose results we already had.
-    existing = _test_job_status_cache.get(job_id)
+    cache_key = (cache_scope, job_id)
+    existing = _test_job_status_cache.get(cache_key)
     if (existing is not None
             and existing["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
             and entry["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
@@ -92,11 +123,11 @@ def _remember_test_job_data(
                                       existing["details"], existing["failed"])):
         # Keep the richer snapshot, but refresh its recency so the protection
         # isn't quietly undone by LRU eviction on a later poll.
-        _test_job_status_cache[job_id] = _test_job_status_cache.pop(job_id)
+        _test_job_status_cache[cache_key] = _test_job_status_cache.pop(cache_key)
         return
 
-    _test_job_status_cache.pop(job_id, None)
-    _test_job_status_cache[job_id] = entry
+    _test_job_status_cache.pop(cache_key, None)
+    _test_job_status_cache[cache_key] = entry
 
     while len(_test_job_status_cache) > _MAX_CACHED_TEST_JOBS:
         oldest = next(iter(_test_job_status_cache), None)
@@ -121,9 +152,9 @@ def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
 
 
 def _cached_test_job_response(
-    job_id: str, error: Any, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: str, job_id: str, error: Any, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> dict[str, Any] | None:
-    entry = _test_job_status_cache.get(job_id)
+    entry = _test_job_status_cache.get((cache_scope, job_id))
     if not entry:
         return None
 
@@ -298,6 +329,7 @@ async def run_tests(
         return MCPResponse(success=False, error="init_timeout must be a positive integer (milliseconds) or None")
 
     unity_instance = await get_unity_instance_from_context(ctx)
+    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
 
     gate = await preflight(ctx, requires_no_tests=True, wait_for_no_compile=True, refresh_if_dirty=True)
     if isinstance(gate, MCPResponse):
@@ -340,6 +372,7 @@ async def run_tests(
         if not response.get("success", True):
             return MCPResponse(**response)
         _remember_test_job_data(
+            cache_scope,
             response.get("data"),
             include_details=include_details,
             include_failed_tests=include_failed_tests,
@@ -369,6 +402,7 @@ async def get_test_job(
                             "Recommended: 30-60 seconds. Returns immediately if tests complete sooner."] = None,
 ) -> GetTestJobResponse | MCPResponse:
     unity_instance = await get_unity_instance_from_context(ctx)
+    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
 
     params: dict[str, Any] = {"job_id": job_id}
     if include_failed_tests:
@@ -412,7 +446,7 @@ async def get_test_job(
                 # Check if tests are done
                 data = response.get("data", {})
                 _remember_test_job_data(
-                    data, include_details=include_details, include_failed_tests=include_failed_tests)
+                    cache_scope, data, include_details=include_details, include_failed_tests=include_failed_tests)
                 status = data.get("status", "")
                 if status in _TERMINAL_TEST_JOB_STATUSES:
                     return GetTestJobResponse(**response)
@@ -453,7 +487,8 @@ async def get_test_job(
             # cached a terminal snapshot, return it now instead of waiting out
             # the timeout.
             if transient_error is not None:
-                terminal = _cached_terminal_test_job_response(job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+                terminal = _cached_terminal_test_job_response(
+                    cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
                 if terminal is not None:
                     return GetTestJobResponse(**terminal)
 
@@ -464,7 +499,7 @@ async def get_test_job(
                     # Deadline hit while Unity was unreachable - serve the last
                     # known snapshot (degraded) if we have one, else the error.
                     cached = _cached_test_job_response(
-                        job_id, transient_error, include_details=include_details, include_failed_tests=include_failed_tests)
+                        cache_scope, job_id, transient_error, include_details=include_details, include_failed_tests=include_failed_tests)
                     if cached:
                         return GetTestJobResponse(**cached)
                     if isinstance(response, dict):
@@ -479,21 +514,23 @@ async def get_test_job(
     # No wait_timeout - return immediately (original behavior)
     response = await _fetch_status()
     if not isinstance(response, dict):
-        terminal = _cached_terminal_test_job_response(job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+        terminal = _cached_terminal_test_job_response(
+            cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
         if terminal is not None:
             return GetTestJobResponse(**terminal)
         cached = _cached_test_job_response(
-            job_id, response, include_details=include_details, include_failed_tests=include_failed_tests)
+            cache_scope, job_id, response, include_details=include_details, include_failed_tests=include_failed_tests)
         if cached:
             return GetTestJobResponse(**cached)
         return MCPResponse(success=False, error=str(response))
     if not response.get("success", True):
         if _is_retryable_transport_failure(response):
-            terminal = _cached_terminal_test_job_response(job_id, include_details=include_details, include_failed_tests=include_failed_tests)
+            terminal = _cached_terminal_test_job_response(
+                cache_scope, job_id, include_details=include_details, include_failed_tests=include_failed_tests)
             if terminal is not None:
                 return GetTestJobResponse(**terminal)
             cached = _cached_test_job_response(
-                job_id, response.get("error"), include_details=include_details, include_failed_tests=include_failed_tests)
+                cache_scope, job_id, response.get("error"), include_details=include_details, include_failed_tests=include_failed_tests)
             if cached:
                 return GetTestJobResponse(**cached)
         return MCPResponse(**response)
@@ -503,7 +540,7 @@ async def get_test_job(
     # detected regardless of polling style.
     data = response.get("data", {})
     _remember_test_job_data(
-        data, include_details=include_details, include_failed_tests=include_failed_tests)
+        cache_scope, data, include_details=include_details, include_failed_tests=include_failed_tests)
     status = data.get("status", "")
     if status == "running":
         progress = data.get("progress") or {}
