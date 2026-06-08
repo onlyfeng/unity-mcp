@@ -513,3 +513,103 @@ async def test_cached_test_jobs_are_scoped_by_unity_instance(monkeypatch):
     assert second.success is False
     assert second.hint == "retry"
     assert second.data is None
+
+
+@pytest.mark.asyncio
+async def test_cached_test_jobs_survive_session_reconnect_for_same_instance(monkeypatch):
+    """The cache scope must not use websocket session ids: they change when
+    Unity reconnects during domain reload, while the test job still belongs to
+    the same Unity instance."""
+    from services.tools.run_tests import get_test_job
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+    calls = {"n": 0}
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "success": True,
+                "data": {
+                    "job_id": params["job_id"],
+                    "status": "running",
+                    "mode": "EditMode",
+                },
+            }
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    ctx_before_reload = DummyContext()
+    await ctx_before_reload.set_state("user_id", "user-1")
+    await ctx_before_reload.set_state("unity_instance", "Project@aaaa")
+    await ctx_before_reload.set_state("unity_session_id", "session-before")
+
+    ctx_after_reload = DummyContext()
+    await ctx_after_reload.set_state("user_id", "user-1")
+    await ctx_after_reload.set_state("unity_instance", "Project@aaaa")
+    await ctx_after_reload.set_state("unity_session_id", "session-after")
+
+    first = await get_test_job(ctx_before_reload, job_id="job-reload")
+    assert first.success is True
+    assert first.data is not None
+    assert first.data.status == "running"
+
+    second = await get_test_job(ctx_after_reload, job_id="job-reload")
+    assert second.success is True
+    assert second.hint == "retry"
+    assert second.data is not None
+    assert second.data.status == "running"
+    assert second.data.transport_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_cached_test_jobs_are_scoped_by_user_for_same_instance(monkeypatch):
+    """Remote-hosted callers sharing a Unity instance must not receive each
+    other's cached test payloads."""
+    from services.tools.run_tests import get_test_job
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if user["id"] == "user-a":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": params["job_id"],
+                    "status": "running",
+                    "mode": "EditMode",
+                },
+            }
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    user = {"id": "user-a"}
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    ctx_a = DummyContext()
+    await ctx_a.set_state("user_id", "user-a")
+    await ctx_a.set_state("unity_instance", "Shared@aaaa")
+    ctx_b = DummyContext()
+    await ctx_b.set_state("user_id", "user-b")
+    await ctx_b.set_state("unity_instance", "Shared@aaaa")
+
+    first = await get_test_job(ctx_a, job_id="same-job")
+    assert first.success is True
+
+    user["id"] = "user-b"
+    second = await get_test_job(ctx_b, job_id="same-job")
+    assert second.success is False
+    assert second.hint == "retry"
+    assert second.data is None

@@ -47,10 +47,6 @@ async def _get_test_job_cache_scope(ctx: Context, unity_instance: str | None) ->
         text = str(value).strip()
         return text or None
 
-    session_id = await _state_value("unity_session_id")
-    if session_id:
-        return f"session:{session_id}"
-
     user_id = await _state_value("user_id")
     instance = (unity_instance or "").strip()
     if user_id and instance:
