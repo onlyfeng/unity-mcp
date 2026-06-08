@@ -169,11 +169,9 @@ def _cached_test_job_response(
     data = dict(entry["data"])
     server_observed_unix_ms = int(time.time() * 1000)
     cached_unix_ms = data.get("cached_unix_ms")
-    last_update_unix_ms = data.get("last_update_unix_ms")
-    last_progress_unix_ms = last_update_unix_ms if last_update_unix_ms is not None else cached_unix_ms
     transport_stall_ms = None
-    if isinstance(last_progress_unix_ms, (int, float)):
-        transport_stall_ms = max(0, server_observed_unix_ms - int(last_progress_unix_ms))
+    if isinstance(cached_unix_ms, (int, float)):
+        transport_stall_ms = max(0, server_observed_unix_ms - int(cached_unix_ms))
 
     server_stuck_suspected = (
         data.get("status") == "running"

@@ -166,11 +166,12 @@ async def test_get_test_job_returns_cached_status_after_transport_retry(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_get_test_job_degraded_response_reports_transport_stall(monkeypatch):
+async def test_get_test_job_degraded_response_uses_cache_age_for_transport_stall(monkeypatch):
     from services.tools.run_tests import get_test_job, run_tests
     import services.tools.run_tests as mod
 
     mod._test_job_status_cache.clear()
+    ticks = iter([130.0, 130.5])
 
     async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
         if command_type == "run_tests":
@@ -186,7 +187,7 @@ async def test_get_test_job_degraded_response_reports_transport_stall(monkeypatc
         return _retryable_get_test_job_timeout()
 
     monkeypatch.setattr(mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
-    monkeypatch.setattr(mod.time, "time", lambda: 130.5)
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks))
 
     start = await run_tests(DummyContext(), mode="EditMode")
     assert start.success is True
@@ -195,13 +196,11 @@ async def test_get_test_job_degraded_response_reports_transport_stall(monkeypatc
     assert resp.success is True
     assert resp.data is not None
     assert resp.data.transport_degraded is True
-    assert resp.data.cached_unix_ms == 130_500
+    assert resp.data.cached_unix_ms == 130_000
     assert resp.data.server_observed_unix_ms == 130_500
-    assert resp.data.transport_stall_ms == 30_500
-    assert resp.data.server_stuck_suspected is True
-    assert resp.data.progress is not None
-    assert resp.data.progress.stuck_suspected is True
-    assert resp.data.progress.blocked_reason == "unity_transport_unresponsive"
+    assert resp.data.transport_stall_ms == 500
+    assert resp.data.server_stuck_suspected is False
+    assert resp.data.progress is None
 
 
 @pytest.mark.asyncio
@@ -247,6 +246,7 @@ async def test_get_test_job_degraded_response_preserves_specific_blocked_reason(
     import services.tools.run_tests as mod
 
     mod._test_job_status_cache.clear()
+    ticks = iter([100.0, 130.0])
 
     async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
         if command_type == "run_tests":
@@ -263,7 +263,7 @@ async def test_get_test_job_degraded_response_preserves_specific_blocked_reason(
         return _retryable_get_test_job_timeout()
 
     monkeypatch.setattr(mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
-    monkeypatch.setattr(mod.time, "time", lambda: 130.0)
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks))
 
     start = await run_tests(DummyContext(), mode="EditMode")
     assert start.success is True
