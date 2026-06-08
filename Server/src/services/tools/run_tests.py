@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Strong references to background fire-and-forget tasks to prevent premature GC.
 _background_tasks: set[asyncio.Task] = set()
 _MAX_CACHED_TEST_JOBS = 20
+_SERVER_STUCK_SUSPECTED_MS = 30_000
 # Each entry: {"data": <snapshot>, "details": bool, "failed": bool} where the
 # flags record the detail level the snapshot was fetched with (include_details /
 # include_failed_tests). They change Unity's serialized payload, so a low-detail
@@ -101,8 +102,11 @@ def _remember_test_job_data(
     if not isinstance(job_id, str) or not job_id.strip():
         return
 
+    snapshot = dict(data)
+    snapshot["cached_unix_ms"] = int(time.time() * 1000)
+
     entry = {
-        "data": dict(data),
+        "data": snapshot,
         "details": bool(include_details),
         "failed": bool(include_failed_tests),
     }
@@ -163,8 +167,35 @@ def _cached_test_job_response(
         return None
 
     data = dict(entry["data"])
+    server_observed_unix_ms = int(time.time() * 1000)
+    cached_unix_ms = data.get("cached_unix_ms")
+    last_update_unix_ms = data.get("last_update_unix_ms")
+    last_progress_unix_ms = last_update_unix_ms if last_update_unix_ms is not None else cached_unix_ms
+    transport_stall_ms = None
+    if isinstance(last_progress_unix_ms, (int, float)):
+        transport_stall_ms = max(0, server_observed_unix_ms - int(last_progress_unix_ms))
+
+    server_stuck_suspected = (
+        data.get("status") == "running"
+        and transport_stall_ms is not None
+        and transport_stall_ms >= _SERVER_STUCK_SUSPECTED_MS
+    )
+
     data["transport_degraded"] = True
     data["transport_error"] = str(error) if error else "Unity did not respond while polling test job"
+    data["server_observed_unix_ms"] = server_observed_unix_ms
+    data["transport_stall_ms"] = transport_stall_ms
+    data["server_stuck_suspected"] = server_stuck_suspected
+    if server_stuck_suspected:
+        progress = data.get("progress")
+        if not isinstance(progress, dict):
+            progress = {}
+        else:
+            progress = dict(progress)
+        progress["stuck_suspected"] = True
+        if not progress.get("blocked_reason"):
+            progress["blocked_reason"] = "unity_transport_unresponsive"
+        data["progress"] = progress
     return {
         "success": True,
         "message": "Returning cached test job status; Unity did not respond to the latest poll.",
@@ -282,11 +313,15 @@ class GetTestJobData(BaseModel):
     started_unix_ms: int | None = None
     finished_unix_ms: int | None = None
     last_update_unix_ms: int | None = None
+    cached_unix_ms: int | None = None
     progress: TestJobProgress | None = None
     error: str | None = None
     result: RunTestsResult | None = None
     transport_degraded: bool | None = None
     transport_error: str | None = None
+    transport_stall_ms: int | None = None
+    server_observed_unix_ms: int | None = None
+    server_stuck_suspected: bool | None = None
 
 
 class GetTestJobResponse(MCPResponse):
