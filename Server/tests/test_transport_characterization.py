@@ -1064,6 +1064,60 @@ class TestPluginHubCommandRouting:
         assert "get_editor_state" in PluginHub._FAST_FAIL_COMMANDS
         assert "get_test_job" in PluginHub._FAST_FAIL_COMMANDS
         assert PluginHub.FAST_FAIL_TIMEOUT == 2.0
+        # get_test_job is a high-frequency poll: it keeps the 2s fast-fail timeout
+        # but is exempt from the up-to-6s readiness probe so polling stays responsive.
+        assert "get_test_job" in PluginHub._PROBE_EXEMPT_COMMANDS
+        assert "ping" in PluginHub._PROBE_EXEMPT_COMMANDS
+        assert "read_console" not in PluginHub._PROBE_EXEMPT_COMMANDS
+
+    @pytest.mark.asyncio
+    async def test_get_test_job_skips_readiness_probe(self, monkeypatch):
+        """get_test_job must not be routed through the bounded ping readiness
+        probe; doing so would block each poll for up to the probe timeout."""
+        calls = []
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True):
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            calls.append(command_type)
+            if command_type == "ping":
+                return {"status": "success", "result": {"message": "pong"}}
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("inst", "get_test_job", {})
+        assert calls == ["get_test_job"]  # no preceding ping probe
+
+    @pytest.mark.asyncio
+    async def test_read_console_still_uses_readiness_probe(self, monkeypatch):
+        """Other fast-fail commands keep the readiness probe (ping before send)."""
+        calls = []
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True):
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            calls.append(command_type)
+            if command_type == "ping":
+                return {"status": "success", "result": {"message": "pong"}}
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("inst", "read_console", {})
+        assert calls == ["ping", "read_console"]  # probe runs before the real send
 
     @pytest.mark.asyncio
     async def test_send_command_respects_requested_timeout(self, configured_plugin_hub):

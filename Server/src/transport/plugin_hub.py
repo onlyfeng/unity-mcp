@@ -106,6 +106,12 @@ class PluginHub(WebSocketEndpoint):
     # or is throttled while unfocused.
     _FAST_FAIL_COMMANDS: set[str] = {
         "read_console", "get_editor_state", "get_test_job", "ping"}
+    # Fast-path commands that skip the bounded readiness probe (the up-to-6s
+    # main-thread ping wait before sending). ping is the probe itself; get_test_job
+    # is a high-frequency poll whose caller (run_tests) already tolerates transient
+    # failures via cache + wait-loop retry, so routing it through the probe would
+    # defeat its fast-fail responsiveness.
+    _PROBE_EXEMPT_COMMANDS: set[str] = {"ping", "get_test_job"}
 
     _registry: PluginRegistry | None = None
     _mcp: FastMCP | None = None
@@ -1008,7 +1014,7 @@ class PluginHub(WebSocketEndpoint):
         # the Unity Editor is unfocused). For fast-path commands, we do a bounded readiness probe using
         # a main-thread ping command (handled by TransportCommandDispatcher) rather than waiting on
         # register_tools (which can be delayed by EditorApplication.delayCall).
-        if retry_on_reload and command_type in cls._FAST_FAIL_COMMANDS and command_type != "ping":
+        if retry_on_reload and command_type in cls._FAST_FAIL_COMMANDS and command_type not in cls._PROBE_EXEMPT_COMMANDS:
             try:
                 max_wait_s = float(os.environ.get(
                     "UNITY_MCP_SESSION_READY_WAIT_SECONDS", "6"))
