@@ -1076,7 +1076,7 @@ class TestPluginHubCommandRouting:
         probe; doing so would block each poll for up to the probe timeout."""
         calls = []
 
-        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True):
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
             return "sess-1"
 
         async def fake_live(session_id):
@@ -1100,7 +1100,7 @@ class TestPluginHubCommandRouting:
         """Other fast-fail commands keep the readiness probe (ping before send)."""
         calls = []
 
-        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True):
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
             return "sess-1"
 
         async def fake_live(session_id):
@@ -1118,6 +1118,33 @@ class TestPluginHubCommandRouting:
 
         await PluginHub.send_command_for_instance("inst", "read_console", {})
         assert calls == ["ping", "read_console"]  # probe runs before the real send
+
+    @pytest.mark.asyncio
+    async def test_fast_fail_commands_cap_session_resolution_wait(self, monkeypatch):
+        """Fast-fail commands must bound the session-resolution reload wait to the
+        fast-fail timeout, so a get_test_job poll can't block for the full 20s
+        reload window. Non-fast-fail commands keep the unbounded (None) wait."""
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen[unity_instance] = resolve_max_wait_s
+            return "sess-1"
+
+        async def fake_live(session_id):
+            return True
+
+        async def fake_send(session_id, command_type, params):
+            return {"status": "success", "result": {}}
+
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+        monkeypatch.setattr(PluginHub, "_ensure_live_connection", fake_live)
+        monkeypatch.setattr(PluginHub, "send_command", fake_send)
+
+        await PluginHub.send_command_for_instance("fast", "get_test_job", {})
+        await PluginHub.send_command_for_instance("slow", "manage_scene", {})
+
+        assert seen["fast"] == PluginHub.FAST_FAIL_TIMEOUT
+        assert seen["slow"] is None
 
     @pytest.mark.asyncio
     async def test_send_command_respects_requested_timeout(self, configured_plugin_hub):
