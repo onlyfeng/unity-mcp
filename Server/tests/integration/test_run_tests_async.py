@@ -185,3 +185,75 @@ async def test_get_test_job_real_error_not_masked_by_cache(monkeypatch):
     resp = await get_test_job(DummyContext(), job_id="job-expired")
     assert resp.success is False
     assert resp.error == "Unknown job_id."
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_wait_keeps_polling_through_transient_failure(monkeypatch):
+    """With wait_timeout set, a transient transport hiccup must not bounce the
+    caller; the wait loop should keep polling until a terminal status."""
+    from services.tools.run_tests import get_test_job, run_tests
+
+    poll = {"n": 0}
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {"success": True, "data": {"job_id": "job-wait", "status": "running", "mode": "EditMode"}}
+        poll["n"] += 1
+        if poll["n"] == 1:
+            return {
+                "success": False,
+                "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+                "hint": "retry",
+            }
+        return {"success": True, "data": {"job_id": "job-wait", "status": "succeeded", "mode": "EditMode"}}
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    # Avoid the real 2s poll interval.
+    async def _instant_sleep(_seconds):
+        return None
+    monkeypatch.setattr(mod.asyncio, "sleep", _instant_sleep)
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-wait", wait_timeout=5)
+    assert poll["n"] == 2  # kept polling past the transient failure
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.status == "succeeded"
+    assert resp.data.transport_degraded is None
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_wait_falls_back_to_cache_at_deadline(monkeypatch):
+    """When the deadline is reached while Unity stays unreachable, the wait loop
+    serves the last cached snapshot flagged as degraded."""
+    from services.tools.run_tests import get_test_job, run_tests
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {"success": True, "data": {"job_id": "job-deadline", "status": "running", "mode": "EditMode"}}
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    async def _instant_sleep(_seconds):
+        return None
+    monkeypatch.setattr(mod.asyncio, "sleep", _instant_sleep)
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-deadline", wait_timeout=0.01)
+    assert resp.success is True
+    assert resp.hint == "retry"
+    assert resp.data is not None
+    assert resp.data.status == "running"
+    assert resp.data.transport_degraded is True

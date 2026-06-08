@@ -318,61 +318,70 @@ async def get_test_job(
         while True:
             response = await _fetch_status()
 
+            # Transient transport failures must not bounce a caller that asked
+            # the server to wait. Treat them as "no fresh data this round" and
+            # keep polling until a terminal status or the deadline; only then
+            # fall back to the cached snapshot. Real tool errors surface now.
+            transient_error: Any = None
             if not isinstance(response, dict):
-                cached = _cached_test_job_response(job_id, response)
-                if cached:
-                    return GetTestJobResponse(**cached)
-                return MCPResponse(success=False, error=str(response))
-
-            if not response.get("success", True):
+                transient_error = response
+            elif not response.get("success", True):
                 if _is_retryable_transport_failure(response):
-                    cached = _cached_test_job_response(job_id, response.get("error"))
-                    if cached:
-                        return GetTestJobResponse(**cached)
-                return MCPResponse(**response)
+                    transient_error = response.get("error")
+                else:
+                    return MCPResponse(**response)
+            else:
+                # Check if tests are done
+                data = response.get("data", {})
+                _remember_test_job_data(data)
+                status = data.get("status", "")
+                if status in ("succeeded", "failed", "cancelled"):
+                    return GetTestJobResponse(**response)
 
-            # Check if tests are done
-            data = response.get("data", {})
-            _remember_test_job_data(data)
-            status = data.get("status", "")
-            if status in ("succeeded", "failed", "cancelled"):
-                return GetTestJobResponse(**response)
+                # Detect progress and reset exponential backoff
+                last_update_unix_ms = data.get("last_update_unix_ms")
+                if prev_last_update_unix_ms is not None and last_update_unix_ms != prev_last_update_unix_ms:
+                    # Progress detected - reset exponential backoff for next potential stall
+                    reset_nudge_backoff()
+                    logger.debug(f"Test job {job_id} made progress - reset nudge backoff")
+                prev_last_update_unix_ms = last_update_unix_ms
 
-            # Detect progress and reset exponential backoff
-            last_update_unix_ms = data.get("last_update_unix_ms")
-            if prev_last_update_unix_ms is not None and last_update_unix_ms != prev_last_update_unix_ms:
-                # Progress detected - reset exponential backoff for next potential stall
-                reset_nudge_backoff()
-                logger.debug(f"Test job {job_id} made progress - reset nudge backoff")
-            prev_last_update_unix_ms = last_update_unix_ms
+                # Check if Unity needs a focus nudge to make progress
+                # This handles OS-level throttling (e.g., macOS App Nap) that can
+                # stall PlayMode tests when Unity is in the background.
+                # Uses exponential backoff: 1s, 2s, 4s, 8s, 10s max between nudges.
+                progress = data.get("progress") or {}
+                editor_is_focused = progress.get("editor_is_focused", True)
+                current_time_ms = int(time.time() * 1000)
 
-            # Check if Unity needs a focus nudge to make progress
-            # This handles OS-level throttling (e.g., macOS App Nap) that can
-            # stall PlayMode tests when Unity is in the background.
-            # Uses exponential backoff: 1s, 2s, 4s, 8s, 10s max between nudges.
-            progress = data.get("progress") or {}
-            editor_is_focused = progress.get("editor_is_focused", True)
-            current_time_ms = int(time.time() * 1000)
-
-            if should_nudge(
-                status=status,
-                editor_is_focused=editor_is_focused,
-                last_update_unix_ms=last_update_unix_ms,
-                current_time_ms=current_time_ms,
-                # Use default stall_threshold_ms (3s)
-            ):
-                logger.info(f"Test job {job_id} appears stalled (unfocused Unity), attempting nudge...")
-                # Lazily resolve project path if not yet available (registry may have become ready)
-                if project_path is None:
-                    project_path = await _get_unity_project_path(unity_instance)
-                # Pass project path for multi-instance support
-                nudged = await nudge_unity_focus(unity_project_path=project_path)
-                if nudged:
-                    logger.info(f"Test job {job_id} nudge completed")
+                if should_nudge(
+                    status=status,
+                    editor_is_focused=editor_is_focused,
+                    last_update_unix_ms=last_update_unix_ms,
+                    current_time_ms=current_time_ms,
+                    # Use default stall_threshold_ms (3s)
+                ):
+                    logger.info(f"Test job {job_id} appears stalled (unfocused Unity), attempting nudge...")
+                    # Lazily resolve project path if not yet available (registry may have become ready)
+                    if project_path is None:
+                        project_path = await _get_unity_project_path(unity_instance)
+                    # Pass project path for multi-instance support
+                    nudged = await nudge_unity_focus(unity_project_path=project_path)
+                    if nudged:
+                        logger.info(f"Test job {job_id} nudge completed")
 
             # Check timeout
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
+                if transient_error is not None:
+                    # Deadline hit while Unity was unreachable - serve the last
+                    # known snapshot (degraded) if we have one, else the error.
+                    cached = _cached_test_job_response(job_id, transient_error)
+                    if cached:
+                        return GetTestJobResponse(**cached)
+                    if isinstance(response, dict):
+                        return MCPResponse(**response)
+                    return MCPResponse(success=False, error=str(response))
                 # Timeout reached, return current status
                 return GetTestJobResponse(**response)
 
