@@ -3,6 +3,14 @@ import pytest
 from .test_helpers import DummyContext
 
 
+def _retryable_get_test_job_timeout():
+    return {
+        "success": False,
+        "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+        "hint": "retry",
+    }
+
+
 @pytest.mark.asyncio
 async def test_run_tests_async_forwards_params(monkeypatch):
     from services.tools.run_tests import run_tests
@@ -155,6 +163,118 @@ async def test_get_test_job_returns_cached_status_after_transport_retry(monkeypa
     assert resp.data.status == "running"
     assert resp.data.transport_degraded is True
     assert "did not respond" in resp.data.transport_error
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_degraded_response_uses_cache_age_for_transport_stall(monkeypatch):
+    from services.tools.run_tests import get_test_job, run_tests
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+    ticks = iter([130.0, 130.5])
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": "job-stalled",
+                    "status": "running",
+                    "mode": "EditMode",
+                    "last_update_unix_ms": 100_000,
+                },
+            }
+        return _retryable_get_test_job_timeout()
+
+    monkeypatch.setattr(mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks))
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-stalled")
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.transport_degraded is True
+    assert resp.data.cached_unix_ms == 130_000
+    assert resp.data.server_observed_unix_ms == 130_500
+    assert resp.data.transport_stall_ms == 500
+    assert resp.data.server_stuck_suspected is False
+    assert resp.data.progress is None
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_degraded_response_uses_cached_time_without_last_update(monkeypatch):
+    from services.tools.run_tests import get_test_job, run_tests
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+    ticks = iter([100.0, 130.25])
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": "job-no-last-update",
+                    "status": "running",
+                    "mode": "EditMode",
+                },
+            }
+        return _retryable_get_test_job_timeout()
+
+    monkeypatch.setattr(mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks))
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-no-last-update")
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.cached_unix_ms == 100_000
+    assert resp.data.server_observed_unix_ms == 130_250
+    assert resp.data.transport_stall_ms == 30_250
+    assert resp.data.server_stuck_suspected is True
+    assert resp.data.progress is not None
+    assert resp.data.progress.blocked_reason == "unity_transport_unresponsive"
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_degraded_response_preserves_specific_blocked_reason(monkeypatch):
+    from services.tools.run_tests import get_test_job, run_tests
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+    ticks = iter([100.0, 130.0])
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": "job-specific-reason",
+                    "status": "running",
+                    "mode": "EditMode",
+                    "last_update_unix_ms": 100_000,
+                    "progress": {"blocked_reason": "domain_reload"},
+                },
+            }
+        return _retryable_get_test_job_timeout()
+
+    monkeypatch.setattr(mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    monkeypatch.setattr(mod.time, "time", lambda: next(ticks))
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-specific-reason")
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.server_stuck_suspected is True
+    assert resp.data.progress is not None
+    assert resp.data.progress.stuck_suspected is True
+    assert resp.data.progress.blocked_reason == "domain_reload"
 
 
 @pytest.mark.asyncio
