@@ -329,3 +329,142 @@ async def test_get_test_job_wait_returns_cached_terminal_without_waiting(monkeyp
     assert resp.data.transport_degraded is None
     assert resp.hint is None
     assert sleeps == []  # returned without waiting out the timeout
+
+
+@pytest.mark.asyncio
+async def test_terminal_cache_not_authoritative_for_higher_detail(monkeypatch):
+    """A terminal snapshot cached from a no-detail poll must NOT be served to a
+    later include_details poll that hits a transport stall (Unity's payload
+    differs and the cache lacks the requested results). The caller should get a
+    plain retry, not a (degraded) terminal status missing the detail it asked
+    for, so it polls again once Unity responds."""
+    from services.tools.run_tests import get_test_job
+
+    n = {"poll": 0}
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        n["poll"] += 1
+        if n["poll"] == 1:
+            # First poll (no detail flags) reports terminal without results.
+            return {"success": True, "data": {"job_id": "job-d", "status": "succeeded", "mode": "EditMode"}}
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    first = await get_test_job(DummyContext(), job_id="job-d")
+    assert first.data.status == "succeeded"
+
+    # Now ask for full details; the cached terminal snapshot lacks them, so we
+    # must neither short-circuit with the clean terminal cache nor serve a
+    # degraded terminal without the requested results — surface a plain retry.
+    resp = await get_test_job(DummyContext(), job_id="job-d", include_details=True)
+    assert resp.success is False
+    assert resp.hint == "retry"
+    assert resp.data is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_cache_authoritative_when_detail_matches(monkeypatch):
+    """When the cached terminal snapshot was fetched with the same detail level,
+    a later transient poll can be served from cache immediately."""
+    from services.tools.run_tests import get_test_job
+
+    n = {"poll": 0}
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        n["poll"] += 1
+        if n["poll"] == 1:
+            assert params.get("includeDetails") is True
+            return {"success": True, "data": {"job_id": "job-d2", "status": "succeeded", "mode": "EditMode"}}
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    first = await get_test_job(DummyContext(), job_id="job-d2", include_details=True)
+    assert first.data.status == "succeeded"
+
+    resp = await get_test_job(DummyContext(), job_id="job-d2", include_details=True)
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.status == "succeeded"
+    assert resp.data.transport_degraded is None
+    assert resp.hint is None
+
+
+@pytest.mark.asyncio
+async def test_low_detail_poll_does_not_clobber_high_detail_terminal(monkeypatch):
+    """A high-detail terminal snapshot must survive a later low-detail poll of
+    the same job, so a subsequent high-detail request can still be served from
+    cache during a transport stall."""
+    from services.tools.run_tests import get_test_job
+
+    n = {"poll": 0}
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        n["poll"] += 1
+        if n["poll"] in (1, 2):
+            # Poll 1 (high detail) and poll 2 (low detail) both report terminal.
+            return {"success": True, "data": {"job_id": "job-d3", "status": "succeeded", "mode": "EditMode"}}
+        return {
+            "success": False,
+            "error": "Unity did not respond to 'get_test_job' within 2.0s; please retry",
+            "hint": "retry",
+        }
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    # Cache a high-detail terminal snapshot, then a low-detail poll of same job.
+    await get_test_job(DummyContext(), job_id="job-d3", include_details=True)
+    await get_test_job(DummyContext(), job_id="job-d3")  # must NOT clobber
+
+    # A high-detail request during a stall is still served from the preserved
+    # high-detail terminal snapshot (clean, not degraded).
+    resp = await get_test_job(DummyContext(), job_id="job-d3", include_details=True)
+    assert resp.success is True
+    assert resp.data is not None
+    assert resp.data.status == "succeeded"
+    assert resp.data.transport_degraded is None
+    assert resp.hint is None
+
+
+@pytest.mark.asyncio
+async def test_protected_terminal_snapshot_refreshes_lru_recency(monkeypatch):
+    """When a low-detail poll is prevented from clobbering a richer terminal
+    snapshot, that snapshot's LRU recency must be refreshed so it isn't evicted
+    prematurely — otherwise the protection is undone on the next poll."""
+    from services.tools.run_tests import get_test_job
+    import services.tools.run_tests as mod
+
+    mod._test_job_status_cache.clear()
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        job_id = params.get("job_id")
+        return {"success": True, "data": {"job_id": job_id, "status": "succeeded", "mode": "EditMode"}}
+
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    # A: high-detail terminal, then B: terminal -> cache order [A, B]
+    await get_test_job(DummyContext(), job_id="A", include_details=True)
+    await get_test_job(DummyContext(), job_id="B", include_details=True)
+    assert list(mod._test_job_status_cache) == ["A", "B"]
+
+    # Low-detail poll of A must not clobber its richer snapshot, and must move it
+    # to the most-recent position -> [B, A].
+    await get_test_job(DummyContext(), job_id="A")
+    assert list(mod._test_job_status_cache) == ["B", "A"]
+    assert mod._test_job_status_cache["A"]["details"] is True  # richer snapshot kept
