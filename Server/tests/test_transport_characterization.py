@@ -1062,6 +1062,7 @@ class TestPluginHubCommandRouting:
         assert "ping" in PluginHub._FAST_FAIL_COMMANDS
         assert "read_console" in PluginHub._FAST_FAIL_COMMANDS
         assert "get_editor_state" in PluginHub._FAST_FAIL_COMMANDS
+        assert "get_test_job" in PluginHub._FAST_FAIL_COMMANDS
         assert PluginHub.FAST_FAIL_TIMEOUT == 2.0
 
     @pytest.mark.asyncio

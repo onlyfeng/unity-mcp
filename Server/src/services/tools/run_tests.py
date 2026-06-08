@@ -23,6 +23,43 @@ logger = logging.getLogger(__name__)
 
 # Strong references to background fire-and-forget tasks to prevent premature GC.
 _background_tasks: set[asyncio.Task] = set()
+_MAX_CACHED_TEST_JOBS = 20
+_test_job_status_cache: dict[str, dict[str, Any]] = {}
+
+
+def _remember_test_job_data(data: Any) -> None:
+    if not isinstance(data, dict):
+        return
+
+    job_id = data.get("job_id")
+    if not isinstance(job_id, str) or not job_id.strip():
+        return
+
+    snapshot = dict(data)
+    _test_job_status_cache.pop(job_id, None)
+    _test_job_status_cache[job_id] = snapshot
+
+    while len(_test_job_status_cache) > _MAX_CACHED_TEST_JOBS:
+        oldest = next(iter(_test_job_status_cache), None)
+        if oldest is None:
+            break
+        _test_job_status_cache.pop(oldest, None)
+
+
+def _cached_test_job_response(job_id: str, error: Any) -> dict[str, Any] | None:
+    cached = _test_job_status_cache.get(job_id)
+    if not cached:
+        return None
+
+    data = dict(cached)
+    data["transport_degraded"] = True
+    data["transport_error"] = str(error) if error else "Unity did not respond while polling test job"
+    return {
+        "success": True,
+        "message": "Returning cached test job status; Unity did not respond to the latest poll.",
+        "hint": "retry",
+        "data": data,
+    }
 
 
 async def _get_unity_project_path(unity_instance: str | None) -> str | None:
@@ -137,6 +174,8 @@ class GetTestJobData(BaseModel):
     progress: TestJobProgress | None = None
     error: str | None = None
     result: RunTestsResult | None = None
+    transport_degraded: bool | None = None
+    transport_error: str | None = None
 
 
 class GetTestJobResponse(MCPResponse):
@@ -216,6 +255,7 @@ async def run_tests(
     if isinstance(response, dict):
         if not response.get("success", True):
             return MCPResponse(**response)
+        _remember_test_job_data(response.get("data"))
         return RunTestsStartResponse(**response)
     return MCPResponse(success=False, error=str(response))
 
@@ -269,13 +309,20 @@ async def get_test_job(
             response = await _fetch_status()
 
             if not isinstance(response, dict):
+                cached = _cached_test_job_response(job_id, response)
+                if cached:
+                    return GetTestJobResponse(**cached)
                 return MCPResponse(success=False, error=str(response))
 
             if not response.get("success", True):
+                cached = _cached_test_job_response(job_id, response.get("error"))
+                if cached:
+                    return GetTestJobResponse(**cached)
                 return MCPResponse(**response)
 
             # Check if tests are done
             data = response.get("data", {})
+            _remember_test_job_data(data)
             status = data.get("status", "")
             if status in ("succeeded", "failed", "cancelled"):
                 return GetTestJobResponse(**response)
@@ -324,14 +371,21 @@ async def get_test_job(
     # No wait_timeout - return immediately (original behavior)
     response = await _fetch_status()
     if not isinstance(response, dict):
+        cached = _cached_test_job_response(job_id, response)
+        if cached:
+            return GetTestJobResponse(**cached)
         return MCPResponse(success=False, error=str(response))
     if not response.get("success", True):
+        cached = _cached_test_job_response(job_id, response.get("error"))
+        if cached:
+            return GetTestJobResponse(**cached)
         return MCPResponse(**response)
 
     # Fire-and-forget nudge check: even without wait_timeout, clients may poll
     # externally. Check if Unity needs a nudge on every call so stalls get
     # detected regardless of polling style.
     data = response.get("data", {})
+    _remember_test_job_data(data)
     status = data.get("status", "")
     if status == "running":
         progress = data.get("progress") or {}

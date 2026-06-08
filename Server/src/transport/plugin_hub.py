@@ -98,14 +98,14 @@ class PluginHub(WebSocketEndpoint):
     PING_INTERVAL = 10
     # Max time (seconds) to wait for pong before considering connection dead
     PING_TIMEOUT = 20
-    # Timeout (seconds) for fast-fail commands like ping/read_console/get_editor_state.
+    # Timeout (seconds) for fast-fail commands like ping/read_console/get_editor_state/get_test_job.
     # Keep short so MCP clients aren't blocked during Unity compilation/reload/unfocused throttling.
     FAST_FAIL_TIMEOUT = 2.0
     # Fast-path commands should never block the client for long; return a retry hint instead.
     # This helps avoid the Cursor-side ~30s tool-call timeout when Unity is compiling/reloading
     # or is throttled while unfocused.
     _FAST_FAIL_COMMANDS: set[str] = {
-        "read_console", "get_editor_state", "ping"}
+        "read_console", "get_editor_state", "get_test_job", "ping"}
 
     _registry: PluginRegistry | None = None
     _mcp: FastMCP | None = None

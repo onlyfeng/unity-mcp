@@ -46,6 +46,10 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
         private Task _receiveTask;
         private Task _keepAliveTask;
         private readonly SemaphoreSlim _sendLock = new(1, 1);
+        // Strong references to in-flight fire-and-forget command handlers so the receive
+        // loop isn't blocked by long-running commands and the tasks aren't GC'd early.
+        private readonly object _executeTasksLock = new();
+        private readonly HashSet<Task> _executeTasks = new();
 
         private Uri _endpointUri;
         private string _sessionId;
@@ -479,7 +483,7 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     await HandleRegisteredAsync(payload, token).ConfigureAwait(false);
                     break;
                 case "execute":
-                    await HandleExecuteAsync(payload, token).ConfigureAwait(false);
+                    StartExecuteTask(payload, token);
                     break;
                 case "ping":
                     await SendPongAsync(token).ConfigureAwait(false);
@@ -488,6 +492,70 @@ namespace MCPForUnity.Editor.Services.Transport.Transports
                     // No-op for unrecognised types (keep-alives, telemetry, etc.)
                     break;
             }
+        }
+
+        private void StartExecuteTask(JObject payload, CancellationToken token)
+        {
+            Task task;
+            try
+            {
+                task = HandleExecuteAsync(payload, token);
+            }
+            catch (Exception ex)
+            {
+                McpLog.Warn($"[WebSocket] Failed to start command handler: {ex.Message}");
+                _ = HandleSocketClosureAsync(ex.Message);
+                return;
+            }
+
+            if (task == null)
+            {
+                return;
+            }
+
+            if (task.IsCompleted)
+            {
+                ObserveExecuteTask(task);
+                return;
+            }
+
+            lock (_executeTasksLock)
+            {
+                _executeTasks.Add(task);
+            }
+
+            task.ContinueWith(t =>
+            {
+                lock (_executeTasksLock)
+                {
+                    _executeTasks.Remove(t);
+                }
+
+                ObserveExecuteTask(t);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        private void ObserveExecuteTask(Task task)
+        {
+            if (task == null)
+            {
+                return;
+            }
+
+            if (task.IsCanceled)
+            {
+                return;
+            }
+
+            if (!task.IsFaulted)
+            {
+                return;
+            }
+
+            Exception ex = task.Exception?.GetBaseException();
+            string message = ex?.Message ?? "Command handler failed";
+            McpLog.Warn($"[WebSocket] Command handler failed: {message}");
+            _ = HandleSocketClosureAsync(message);
         }
 
         private void ApplyWelcome(JObject payload)
