@@ -257,3 +257,32 @@ async def test_get_test_job_wait_falls_back_to_cache_at_deadline(monkeypatch):
     assert resp.data is not None
     assert resp.data.status == "running"
     assert resp.data.transport_degraded is True
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_unity_side_command_timeout_is_retryable(monkeypatch):
+    """A Unity-side dispatcher timeout (success=False, no hint, 'timed out after'
+    message) must be treated as a transient transport timeout and serve the
+    cached snapshot, not surfaced as a hard failure."""
+    from services.tools.run_tests import get_test_job, run_tests
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {"success": True, "data": {"job_id": "job-busy", "status": "running", "mode": "EditMode"}}
+        # No hint, and message differs from the server-side fast-fail text.
+        return {"success": False, "error": "Command 'get_test_job' timed out after 2 seconds"}
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-busy")
+    assert resp.success is True
+    assert resp.hint == "retry"
+    assert resp.data is not None
+    assert resp.data.status == "running"
+    assert resp.data.transport_degraded is True
+    assert "timed out after" in resp.data.transport_error

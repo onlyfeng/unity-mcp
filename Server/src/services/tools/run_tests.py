@@ -53,7 +53,12 @@ def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
     if response.get("hint") == "retry":
         return True
     error = str(response.get("error") or "").lower()
-    return "did not respond" in error
+    # "did not respond" -> server-side fast-fail timeout (plugin_hub).
+    # "timed out after" -> Unity accepted the execute message but the dispatcher
+    #   did not finish within the command timeout while the Editor was busy
+    #   (WebSocketTransportClient.HandleExecuteAsync); normalized to success=False
+    #   with no hint, so match it explicitly.
+    return "did not respond" in error or "timed out after" in error
 
 
 def _cached_test_job_response(job_id: str, error: Any) -> dict[str, Any] | None:
