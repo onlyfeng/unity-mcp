@@ -289,6 +289,62 @@ class TestUnityInstanceMiddlewareInjection:
         assert len(calls) == 0
 
     @pytest.mark.asyncio
+    async def test_middleware_caps_fast_fail_tool_session_resolution(self, mock_context, monkeypatch):
+        """
+        Current behavior: HTTP middleware pre-resolution applies the same short
+        session-resolution cap for fast-fail tools (e.g. get_test_job) that
+        PluginHub.send_command_for_instance uses later.
+        """
+        middleware = UnityInstanceMiddleware()
+        await middleware.set_active_instance(mock_context, "Project@abc123")
+        middleware_ctx = Mock()
+        middleware_ctx.fastmcp_context = mock_context
+        middleware_ctx.message = SimpleNamespace(name="get_test_job", arguments={})
+
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen["resolve_max_wait_s"] = resolve_max_wait_s
+            return "session-1"
+
+        monkeypatch.setattr(config, "transport_mode", "http")
+        monkeypatch.setattr(config, "http_remote_hosted", False)
+        monkeypatch.setattr(PluginHub, "is_configured", lambda: True)
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+
+        await middleware._inject_unity_instance(middleware_ctx)
+
+        assert seen["resolve_max_wait_s"] == PluginHub.FAST_FAIL_TIMEOUT
+        mock_context.set_state.assert_any_call("unity_session_id", "session-1")
+
+    @pytest.mark.asyncio
+    async def test_middleware_keeps_default_session_resolution_for_normal_tools(self, mock_context, monkeypatch):
+        """
+        Current behavior: non-fast-fail tools keep the default session-resolution
+        wait, so normal tool calls still tolerate longer reload windows.
+        """
+        middleware = UnityInstanceMiddleware()
+        await middleware.set_active_instance(mock_context, "Project@abc123")
+        middleware_ctx = Mock()
+        middleware_ctx.fastmcp_context = mock_context
+        middleware_ctx.message = SimpleNamespace(name="manage_scene", arguments={})
+
+        seen = {}
+
+        async def fake_resolve(unity_instance, user_id=None, retry_on_reload=True, resolve_max_wait_s=None):
+            seen["resolve_max_wait_s"] = resolve_max_wait_s
+            return "session-1"
+
+        monkeypatch.setattr(config, "transport_mode", "http")
+        monkeypatch.setattr(config, "http_remote_hosted", False)
+        monkeypatch.setattr(PluginHub, "is_configured", lambda: True)
+        monkeypatch.setattr(PluginHub, "_resolve_session_id", fake_resolve)
+
+        await middleware._inject_unity_instance(middleware_ctx)
+
+        assert seen["resolve_max_wait_s"] is None
+
+    @pytest.mark.asyncio
     async def test_list_tools_filters_disabled_unity_tools_and_aliases(self, mock_context, monkeypatch):
         """
         Current behavior: in HTTP mode with a connected Unity session, on_list_tools()
