@@ -46,6 +46,16 @@ def _remember_test_job_data(data: Any) -> None:
         _test_job_status_cache.pop(oldest, None)
 
 
+def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
+    """True when a success=False response is a transient transport/timeout
+    failure that is safe to mask with a cached snapshot, rather than a real
+    tool error like an invalid/expired job id."""
+    if response.get("hint") == "retry":
+        return True
+    error = str(response.get("error") or "").lower()
+    return "did not respond" in error
+
+
 def _cached_test_job_response(job_id: str, error: Any) -> dict[str, Any] | None:
     cached = _test_job_status_cache.get(job_id)
     if not cached:
@@ -315,9 +325,10 @@ async def get_test_job(
                 return MCPResponse(success=False, error=str(response))
 
             if not response.get("success", True):
-                cached = _cached_test_job_response(job_id, response.get("error"))
-                if cached:
-                    return GetTestJobResponse(**cached)
+                if _is_retryable_transport_failure(response):
+                    cached = _cached_test_job_response(job_id, response.get("error"))
+                    if cached:
+                        return GetTestJobResponse(**cached)
                 return MCPResponse(**response)
 
             # Check if tests are done
@@ -376,9 +387,10 @@ async def get_test_job(
             return GetTestJobResponse(**cached)
         return MCPResponse(success=False, error=str(response))
     if not response.get("success", True):
-        cached = _cached_test_job_response(job_id, response.get("error"))
-        if cached:
-            return GetTestJobResponse(**cached)
+        if _is_retryable_transport_failure(response):
+            cached = _cached_test_job_response(job_id, response.get("error"))
+            if cached:
+                return GetTestJobResponse(**cached)
         return MCPResponse(**response)
 
     # Fire-and-forget nudge check: even without wait_timeout, clients may poll

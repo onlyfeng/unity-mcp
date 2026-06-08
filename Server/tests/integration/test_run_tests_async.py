@@ -155,3 +155,33 @@ async def test_get_test_job_returns_cached_status_after_transport_retry(monkeypa
     assert resp.data.status == "running"
     assert resp.data.transport_degraded is True
     assert "did not respond" in resp.data.transport_error
+
+
+@pytest.mark.asyncio
+async def test_get_test_job_real_error_not_masked_by_cache(monkeypatch):
+    """A genuine tool error (e.g. expired job id) must surface even when a
+    cached snapshot exists, instead of being hidden behind a retry hint."""
+    from services.tools.run_tests import get_test_job, run_tests
+
+    async def fake_send_with_unity_instance(send_fn, unity_instance, command_type, params, **kwargs):
+        if command_type == "run_tests":
+            return {
+                "success": True,
+                "data": {
+                    "job_id": "job-expired",
+                    "status": "running",
+                    "mode": "EditMode",
+                },
+            }
+        return {"success": False, "error": "Unknown job_id."}
+
+    import services.tools.run_tests as mod
+    monkeypatch.setattr(
+        mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+
+    start = await run_tests(DummyContext(), mode="EditMode")
+    assert start.success is True
+
+    resp = await get_test_job(DummyContext(), job_id="job-expired")
+    assert resp.success is False
+    assert resp.error == "Unknown job_id."
