@@ -51,8 +51,8 @@ def ping():
         unity-mcp camera ping
     """
     config = get_config()
-    result = run_command(config, "manage_camera", {"action": "ping"})
-    format_output(result, config)
+    result = run_command("manage_camera", {"action": "ping"}, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("list")
@@ -65,8 +65,8 @@ def list_cameras():
         unity-mcp camera list
     """
     config = get_config()
-    result = run_command(config, "manage_camera", {"action": "list_cameras"})
-    format_output(result, config)
+    result = run_command("manage_camera", {"action": "list_cameras"}, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("brain-status")
@@ -79,8 +79,8 @@ def brain_status():
         unity-mcp camera brain-status
     """
     config = get_config()
-    result = run_command(config, "manage_camera", {"action": "get_brain_status"})
-    format_output(result, config)
+    result = run_command("manage_camera", {"action": "get_brain_status"}, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -125,8 +125,8 @@ def create(name, preset, follow, look_at, priority, fov):
     if props:
         params["properties"] = props
 
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("ensure-brain")
@@ -155,8 +155,8 @@ def ensure_brain(camera_ref, blend_style, blend_duration):
     if props:
         params["properties"] = props
 
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -189,8 +189,8 @@ def set_target(target, search_method, follow, look_at):
         "searchMethod": search_method,
         "properties": props if props else None,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("set-lens")
@@ -228,8 +228,8 @@ def set_lens(target, search_method, fov, near, far, ortho_size, dutch):
         "searchMethod": search_method,
         "properties": props if props else None,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("set-priority")
@@ -251,8 +251,8 @@ def set_priority(target, search_method, priority):
         "searchMethod": search_method,
         "properties": {"priority": priority},
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -286,8 +286,8 @@ def set_body(target, search_method, body_type, props):
         "searchMethod": search_method,
         "properties": properties if properties else None,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("set-aim")
@@ -316,8 +316,8 @@ def set_aim(target, search_method, aim_type, props):
         "searchMethod": search_method,
         "properties": properties if properties else None,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("set-noise")
@@ -346,8 +346,8 @@ def set_noise(target, search_method, amplitude, frequency):
         "searchMethod": search_method,
         "properties": props if props else None,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -379,8 +379,8 @@ def add_extension(target, extension_type, search_method, props):
         "searchMethod": search_method,
         "properties": properties,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("remove-extension")
@@ -402,8 +402,8 @@ def remove_extension(target, extension_type, search_method):
         "searchMethod": search_method,
         "properties": {"extensionType": extension_type},
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -432,8 +432,8 @@ def set_blend(style, duration):
     if props:
         params["properties"] = props
 
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("force")
@@ -453,8 +453,8 @@ def force_camera(target, search_method):
         "target": target,
         "searchMethod": search_method,
     })
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("release")
@@ -467,8 +467,8 @@ def release_override():
         unity-mcp camera release
     """
     config = get_config()
-    result = run_command(config, "manage_camera", {"action": "release_override"})
-    format_output(result, config)
+    result = run_command("manage_camera", {"action": "release_override"}, config)
+    click.echo(format_output(result, config.format))
 
 
 # =============================================================================
@@ -488,8 +488,11 @@ def release_override():
               help="Batch capture mode.")
 @click.option("--view-target", default=None,
               help="Target to focus on (name/path/ID or [x,y,z]). Aims camera (game_view) or frames Scene View (scene_view).")
+@click.option("--output-folder", default=None,
+              help="Output folder, project-relative (e.g. 'Assets/Screenshots' or 'Captures') or absolute inside the project. "
+                   "Overrides Editor preference; falls back to Assets/Screenshots when unset.")
 @handle_unity_errors
-def screenshot(camera_ref, file_name, super_size, include_image, max_resolution, capture_source, batch, view_target):
+def screenshot(camera_ref, file_name, super_size, include_image, max_resolution, capture_source, batch, view_target, output_folder):
     """Capture a screenshot from a camera.
 
     \b
@@ -498,6 +501,7 @@ def screenshot(camera_ref, file_name, super_size, include_image, max_resolution,
         unity-mcp camera screenshot --camera-ref "CM FollowCam" --include-image --max-resolution 512
         unity-mcp camera screenshot --capture-source scene_view --view-target Canvas --include-image
         unity-mcp camera screenshot --batch surround --view-target Player
+        unity-mcp camera screenshot --output-folder Captures
     """
     config = get_config()
     params: dict[str, Any] = {"action": "screenshot"}
@@ -517,15 +521,20 @@ def screenshot(camera_ref, file_name, super_size, include_image, max_resolution,
         params["batch"] = batch
     if view_target:
         params["viewTarget"] = view_target
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    if output_folder:
+        params["outputFolder"] = output_folder
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))
 
 
 @camera.command("screenshot-multiview")
 @click.option("--max-resolution", type=int, default=None, help="Max resolution per tile.")
 @click.option("--view-target", default=None, help="Center target for the multiview capture.")
+@click.option("--output-folder", default=None,
+              help="Output folder, project-relative or absolute inside the project. "
+                   "Overrides Editor preference; falls back to Assets/Screenshots when unset.")
 @handle_unity_errors
-def screenshot_multiview(max_resolution, view_target):
+def screenshot_multiview(max_resolution, view_target, output_folder):
     """Capture a 6-angle contact sheet around the scene.
 
     \b
@@ -539,5 +548,7 @@ def screenshot_multiview(max_resolution, view_target):
         params["maxResolution"] = max_resolution
     if view_target:
         params["viewTarget"] = view_target
-    result = run_command(config, "manage_camera", params)
-    format_output(result, config)
+    if output_folder:
+        params["outputFolder"] = output_folder
+    result = run_command("manage_camera", params, config)
+    click.echo(format_output(result, config.format))

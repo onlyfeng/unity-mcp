@@ -311,14 +311,19 @@ Targeting Unity instances:
 Important Workflows:
 
 Resources vs Tools:
-- Use RESOURCES to read editor state (editor_state, project_info, project_tags, tests, etc)
+- Use RESOURCES to read editor state (mcpforunity://editor/state, mcpforunity://project/info, mcpforunity://project/tags, mcpforunity://tests, etc)
 - Use TOOLS to perform actions and mutations (manage_editor for play mode control, tag/layer management, etc)
 - Always check related resources before modifying the engine state with tools
+
+Reading resources (read this before using ANY resource named below):
+- Resources are addressed by URI, never by name. A resource's name and URI are NOT interchangeable: names use underscores (e.g. editor_state) while URIs use slashes (e.g. mcpforunity://editor/state). Do NOT build a URI by swapping separators in the name — you will 404.
+- These instructions always spell resources as full mcpforunity:// URIs — read one exactly as written. If you only have a name (from resources/list or another tool's output), look its URI up in resources/list rather than guessing it.
+- Resource payloads are wrapped: the content lives under a top-level `data` object, so field paths are `data.<section>.<field>` (e.g. `data.advice.ready_for_tools`), not bare top-level fields.
 
 Script Management:
 - After creating or modifying scripts (by your own tools or the `manage_script` tool) use `read_console` to check for compilation errors before proceeding
 - Only after successful compilation can new components/types be used
-- You can poll the `editor_state` resource's `isCompiling` field to check if the domain reload is complete
+- You can poll mcpforunity://editor/state and read `data.compilation.is_compiling` to check if the domain reload is complete, or `data.advice.ready_for_tools` for overall readiness
 
 Scene Setup:
 - Always include a Camera and main Light (Directional Light) in new scenes
@@ -334,7 +339,7 @@ Console Monitoring:
 - Filter by log type (Error, Warning, Log) to focus on specific issues
 
 Menu Items:
-- Use `execute_menu_item` when you have read the menu items resource
+- Use `execute_menu_item` when you have read the mcpforunity://menu-items resource
 - This lets you interact with Unity's menu system and third-party tools
 
 Unity API Verification (requires 'docs' tool group):
@@ -884,10 +889,32 @@ Examples:
     if args.http_port:
         logger.info(f"HTTP port override: {http_port}")
 
-    project_scoped_tools = (
+    # Explicit CLI/env overrides always win
+    project_scoped_tools_explicit = (
         bool(args.project_scoped_tools)
         or os.environ.get("UNITY_MCP_PROJECT_SCOPED_TOOLS", "").lower() in ("true", "1", "yes", "on")
     )
+
+    # If not explicitly set, check Unity status files for the default instance.
+    # In stdio mode there is typically only one instance, so "first match wins" is fine.
+    project_scoped_tools = project_scoped_tools_explicit
+    if not project_scoped_tools_explicit:
+        try:
+            from transport.legacy.unity_connection import get_unity_connection_pool
+            pool = get_unity_connection_pool()
+            instances = pool.discover_all_instances()
+            # If ANY discovered instance requests project-scoped tools, enable them
+            for inst in instances:
+                if getattr(inst, "project_scoped_tools", False):
+                    project_scoped_tools = True
+                    logger.info(
+                        "Enabling project-scoped tools because Unity instance %s requested it",
+                        inst.id,
+                    )
+                    break
+        except Exception:
+            logger.debug("Could not discover Unity instances for project-scoped tool default", exc_info=True)
+
     mcp = create_mcp_server(project_scoped_tools)
 
     # Determine transport mode
