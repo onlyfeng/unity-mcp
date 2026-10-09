@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using MCPForUnity.Editor.Helpers;
 using NUnit.Framework;
@@ -6,6 +8,47 @@ namespace MCPForUnityTests.Editor.Helpers
 {
     public class UvxLaunchArgsTests
     {
+        private static readonly string[] CorporateCaEnvVars =
+            { "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS" };
+
+        private readonly Dictionary<string, string> _savedEnv = new();
+
+        [SetUp]
+        public void SetUp()
+        {
+            foreach (string name in CorporateCaEnvVars)
+            {
+                _savedEnv[name] = Environment.GetEnvironmentVariable(name);
+                Environment.SetEnvironmentVariable(name, null);
+            }
+        }
+
+        [TearDown]
+        public void TearDown()
+        {
+            foreach (var entry in _savedEnv)
+                Environment.SetEnvironmentVariable(entry.Key, entry.Value);
+        }
+
+        [Test]
+        public void BuildUvxServerLaunchArgs_OmitsNativeTls_WithoutCorporateCa()
+        {
+            CollectionAssert.DoesNotContain(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
+        }
+
+        [Test]
+        public void BuildUvxServerLaunchArgs_AddsNativeTls_BehindCorporateCa()
+        {
+            Environment.SetEnvironmentVariable("REQUESTS_CA_BUNDLE", "/etc/corp-ca.pem");
+
+            var args = AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false);
+
+            CollectionAssert.Contains(args, "--native-tls");
+            // uv builds that predate the --system-certs rename reject it outright.
+            CollectionAssert.DoesNotContain(args, "--system-certs");
+        }
+
         [TestCase("mcp-for-unity", "mcp-for-unity")]
         [TestCase("", "\"\"")]
         [TestCase("mcpforunityserver>=0.0.0a0", "\"mcpforunityserver>=0.0.0a0\"")]

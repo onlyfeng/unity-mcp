@@ -21,7 +21,7 @@ namespace MCPForUnity.Editor.Helpers
         {
             if (args == null) return;
             // Route everything through the centralized builder so Codex emits exactly
-            // the same uvx command shape (dev-flags / prerelease / --from)
+            // the same uvx command shape (native-tls / dev-flags / prerelease / --from)
             // as ConfigJsonBuilder, OpenCodeConfigurator, and the Claude CLI path.
             foreach (string arg in AssetPathUtility.BuildUvxServerLaunchArgs(packageName, includeTransportStdio: true))
                 args.Add(new TomlString { Value = arg });

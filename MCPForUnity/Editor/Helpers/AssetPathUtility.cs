@@ -319,6 +319,33 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
+        /// Environment variables set by corporate TLS-inspecting proxies (Zscaler, Netskope, ...)
+        /// and by tooling behind a custom CA chain. When any is set, uv is told to trust the OS
+        /// certificate store so PyPI fetches succeed behind the proxy.
+        /// </summary>
+        private static readonly string[] CorporateCaEnvVars =
+        {
+            "SSL_CERT_FILE",
+            "REQUESTS_CA_BUNDLE",
+            "CURL_CA_BUNDLE",
+            "NODE_EXTRA_CA_CERTS",
+        };
+
+        /// <summary>
+        /// Emits <c>--native-tls</c> rather than its newer name <c>--system-certs</c>: current uv
+        /// still accepts the old name, while uv builds that predate the rename reject the new one.
+        /// </summary>
+        private static IReadOnlyList<string> GetNativeTlsArgs()
+        {
+            foreach (string name in CorporateCaEnvVars)
+            {
+                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
+                    return new[] { "--native-tls" };
+            }
+            return Array.Empty<string>();
+        }
+
+        /// <summary>
         /// If the resolved launcher is uv (not uvx), prepend "tool run" so the same
         /// uvx-style args ("--from &lt;src&gt; mcp-for-unity") work — uv's top-level CLI is
         /// "uv [OPTIONS] &lt;COMMAND&gt;", so calling "uv --from ..." directly fails. The
@@ -341,11 +368,11 @@ namespace MCPForUnity.Editor.Helpers
         /// Single source of truth for uvx args used to launch the MCP for Unity server.
         /// Centralizing this here ensures every client configurator (JSON, TOML, Claude CLI,
         /// OpenCode, etc.) emits an identical command shape:
-        ///   <c>uvx[.exe] [--no-cache --refresh | --offline] --prerelease explicit
+        ///   <c>uvx[.exe] [--native-tls] [--no-cache --refresh | --offline] --prerelease explicit
         ///   --from mcpforunityserver&gt;=0.0.0a0 mcp-for-unity [--transport stdio]</c>
         /// When PathResolver falls back to uv instead of uvx, a "tool run" prefix is
         /// inserted automatically. Per-configurator string-splicing of <c>--from</c> is
-        /// forbidden; callers must use this builder so we keep the
+        /// forbidden; callers must use this builder so we keep the native-tls /
         /// prerelease / dev-flags ordering consistent.
         /// MUST be called from the main thread (reads EditorPrefs).
         /// </summary>
@@ -357,6 +384,8 @@ namespace MCPForUnity.Editor.Helpers
             string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
             foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
                 args.Add(arg);
+            foreach (string flag in GetNativeTlsArgs())
+                args.Add(flag);
             foreach (string flag in GetUvxDevFlagsList())
                 args.Add(flag);
             foreach (string arg in GetBetaServerFromArgsList())

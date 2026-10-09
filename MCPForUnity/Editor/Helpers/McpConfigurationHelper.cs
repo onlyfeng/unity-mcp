@@ -264,7 +264,7 @@ namespace MCPForUnity.Editor.Helpers
 
             return "Refusing to write Unity MCP stdio config with a Windows batch shim. " +
                    $"Detected '{uvxPath}', which can corrupt arguments such as mcpforunityserver>=0.0.0a0. " +
-                   "Set the uvx path override to the real uvx.exe/uv.exe.";
+                   "Set the uvx path override to the real uvx.exe/uv.exe, or clear it so pyenv-win shims are resolved automatically.";
         }
 
         public static bool PathsEqual(string a, string b)

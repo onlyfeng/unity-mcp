@@ -81,10 +81,66 @@ namespace MCPForUnity.Editor.Services
                         }
                     }
                 }
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    if (!_pyenvUvxResolved)
+                    {
+                        _pyenvUvxPath = ResolveUvxBehindPyenvShim(GetPyenvWinRoot());
+                        _pyenvUvxResolved = true;
+                    }
+                    return _pyenvUvxPath;
+                }
             }
             catch (Exception ex)
             {
                 McpLog.Debug($"PathResolver error: {ex.Message}");
+            }
+
+            return null;
+        }
+
+        // pyenv-win is slow to start, so its answer is cached for the domain.
+        private static bool _pyenvUvxResolved;
+        private static string _pyenvUvxPath;
+
+        private static string GetPyenvWinRoot()
+        {
+            string pyenvRoot = Environment.GetEnvironmentVariable("PYENV");
+            return string.IsNullOrEmpty(pyenvRoot)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pyenv", "pyenv-win")
+                : pyenvRoot;
+        }
+
+        /// <summary>
+        /// pyenv-win exposes uv only as .bat shims (shims\uvx.bat). MCP clients launch those
+        /// through cmd.exe, which parses the '>' in "mcpforunityserver>=0.0.0a0" as redirection,
+        /// so ask pyenv for the real uvx.exe/uv.exe behind the shim instead.
+        /// Returns null when pyenv-win or a uv shim is absent, or pyenv can't resolve one.
+        /// </summary>
+        internal static string ResolveUvxBehindPyenvShim(string pyenvRoot)
+        {
+            if (string.IsNullOrEmpty(pyenvRoot))
+                return null;
+
+            string pyenvBat = Path.Combine(pyenvRoot, "bin", "pyenv.bat");
+            if (!File.Exists(pyenvBat))
+                return null;
+
+            foreach (string command in new[] { "uvx", "uv" })
+            {
+                if (!File.Exists(Path.Combine(pyenvRoot, "shims", command + ".bat")))
+                    continue;
+                if (!ExecPath.TryRun(pyenvBat, $"which {command}", null, out string stdout, out _, timeoutMs: 10000))
+                    continue;
+
+                string path = stdout.Split('\n').Select(line => line.Trim()).LastOrDefault(line => line.Length > 0);
+                if (!string.IsNullOrEmpty(path) &&
+                    path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(path))
+                {
+                    return path;
+                }
             }
 
             return null;
