@@ -51,7 +51,7 @@ namespace MCPForUnity.Editor.Services.Server
                 true
             );
 
-            // Reuse the centralized uvx launch builder (system-certs / dev-flags / --from /
+            // Reuse the centralized uvx launch builder (dev-flags / --from /
             // package) then append the HTTP-specific suffix. Pass every arg through
             // QuoteCommandLineArg so we are safe whether uvxPath is a real .exe or a
             // pyenv-win .bat shim — cmd.exe would otherwise interpret '>' in

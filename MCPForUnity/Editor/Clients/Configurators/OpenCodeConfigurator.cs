@@ -126,14 +126,12 @@ namespace MCPForUnity.Editor.Clients.Configurators
                 string path = GetConfigPath();
                 McpConfigurationHelper.EnsureConfigDirectoryExists(path);
 
-                // Preflight the stdio launch BEFORE any disk write. Only runs for stdio
-                // transport; HTTP is a no-op. Kept here (not in BuildServerEntry) so that
-                // GetManualSnippet() stays a pure function — copying the command should
-                // never trigger a 60s subprocess/network probe or fail on transient errors.
-                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
-                if (!string.IsNullOrEmpty(preflightError))
+                // Checked in the write path only, not in BuildServerEntry, so copying the
+                // manual snippet never fails on it.
+                string shimError = McpConfigurationHelper.GetStdioShimError();
+                if (!string.IsNullOrEmpty(shimError))
                 {
-                    client.SetStatus(McpStatus.Error, preflightError);
+                    client.SetStatus(McpStatus.Error, shimError);
                     return;
                 }
 

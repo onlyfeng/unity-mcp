@@ -912,21 +912,9 @@ namespace MCPForUnity.Editor.Clients
             }
             else
             {
-                // Last-line defense for background callers: refuse to register a Windows
-                // .bat/.cmd shim. The full PreflightStdioServerLaunchIfNeeded() is main-
-                // thread-only (reads EditorPrefs) and the UI caller already runs it
-                // before scheduling this Task; this thread-safe path-string check just
-                // catches any future caller that forgets that prerequisite.
-                if (McpConfigurationHelper.IsWindowsShellShimCommand(uvxPath))
-                {
-                    throw new InvalidOperationException(
-                        "Refusing to register Unity MCP with Claude Code using a Windows batch shim. " +
-                        $"Detected '{uvxPath}', which can corrupt arguments such as mcpforunityserver>=0.0.0a0. " +
-                        "Install uv so a real uvx.exe/uv.exe is available, or set the uvx path override.");
-                }
                 // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664).
                 // `uvxLaunchArgs` was produced on the main thread by BuildUvxServerLaunchArgsString and already
-                // contains the system-certs / dev-flags / --prerelease / --from / package shape, plus the
+                // contains the dev-flags / --prerelease / --from / package shape, plus the
                 // implicit "tool run" prefix when the resolved launcher is uv.
                 args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxLaunchArgs}";
             }
@@ -1002,19 +990,17 @@ namespace MCPForUnity.Editor.Clients
             }
             else
             {
-                // Preflight the stdio launch before we let `claude mcp add` write the
-                // registration. This synchronous Register() path is reachable from
-                // non-UI flows too (CheckStatus auto-rewrite, migration), so the
-                // preflight gate cannot live only in the UI async wrapper.
-                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
-                if (!string.IsNullOrEmpty(preflightError))
+                var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
+                // This synchronous Register() path is reachable from non-UI flows too
+                // (CheckStatus auto-rewrite, migration), so the check cannot live only in the UI.
+                string shimError = McpConfigurationHelper.GetStdioShimError(uvxPath, useStdio: true);
+                if (!string.IsNullOrEmpty(shimError))
                 {
-                    throw new InvalidOperationException(preflightError);
+                    throw new InvalidOperationException(shimError);
                 }
 
-                var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
                 // Use the centralized launch-arg builder so we keep the same shape
-                // (system-certs / dev-flags / --prerelease / --from / package) AND pick up
+                // (dev-flags / --prerelease / --from / package) AND pick up
                 // the implicit "tool run" prefix when PathResolver lands on uv instead
                 // of uvx. Manual string-splicing of `--from` here previously dropped that
                 // prefix, breaking Claude Code stdio registration on uv.exe-only hosts.

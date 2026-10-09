@@ -17,33 +17,15 @@ namespace MCPForUnity.Editor.Services
     public class PathResolverService : IPathResolverService
     {
         private bool _hasUvxPathFallback;
-        private bool _resolvedUvxIsShim;
 
         public bool HasUvxPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.UvxPathOverride, null));
         public bool HasClaudeCliPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.ClaudeCliPathOverride, null));
         public bool HasUvxPathFallback => _hasUvxPathFallback;
-        public bool ResolvedUvxIsShim => _resolvedUvxIsShim;
-
-        /// <summary>
-        /// Returns true if a path points to a Windows .bat/.cmd shim (e.g. pyenv-win's
-        /// uvx.bat / uv.cmd). Shim launchers route arguments through cmd.exe, which
-        /// interprets shell metacharacters in our args — most notably the '>' in
-        /// "mcpforunityserver&gt;=0.0.0a0" is parsed as stdout redirection, leaving uvx
-        /// with a bare "--from" and no value. Configurators should emit real .exe paths
-        /// in client configs and treat shim resolution as a fallback only.
-        /// </summary>
-        public static bool IsShimPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            return path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
-        }
 
         public string GetUvxPath()
         {
-            // Reset transient flags at the start of each resolution
+            // Reset fallback flag at the start of each resolution
             _hasUvxPathFallback = false;
-            _resolvedUvxIsShim = false;
 
             // Check override first - only validate if explicitly set
             if (HasUvxPathOverride)
@@ -52,7 +34,6 @@ namespace MCPForUnity.Editor.Services
                 // Validate the override - if invalid, fall back to system discovery
                 if (TryValidateUvxExecutable(overridePath, out string version))
                 {
-                    _resolvedUvxIsShim = IsShimPath(overridePath);
                     return overridePath;
                 }
                 // Override is set but invalid - fall back to system discovery
@@ -60,18 +41,16 @@ namespace MCPForUnity.Editor.Services
                 if (!string.IsNullOrEmpty(fallbackPath))
                 {
                     _hasUvxPathFallback = true;
-                    _resolvedUvxIsShim = IsShimPath(fallbackPath);
                     return fallbackPath;
                 }
                 // Return null to indicate override is invalid and no system fallback found
                 return null;
             }
 
-            // No override set - try discovery (uvx.exe before uvx.bat/.cmd, then uv variants)
+            // No override set - try discovery (uvx first, then uv)
             string discovered = ResolveUvxFromSystem();
             if (!string.IsNullOrEmpty(discovered))
             {
-                _resolvedUvxIsShim = IsShimPath(discovered);
                 return discovered;
             }
 
@@ -87,15 +66,9 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Probe order on Windows: every real .exe before any .bat/.cmd shim,
-                // even across the uvx/uv family boundary. PreflightStdioServerLaunchIfNeeded
-                // now hard-rejects .bat / .cmd commands (cmd.exe corrupts the '>' in
-                // "mcpforunityserver>=0.0.0a0"), so ranking uvx.bat above uv.exe would
-                // convert a runnable "uv.exe + uvx.bat" host into a blocking error.
-                // AssetPathUtility.BuildUvxServerLaunchArgs prepends "tool run" when the
-                // resolved launcher is uv.*, so uv.exe with uvx-style args still works.
+                // Try uvx first, then uv
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uv.exe", "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" }
+                    ? new[] { "uvx.exe", "uv.exe" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)
@@ -142,24 +115,13 @@ namespace MCPForUnity.Editor.Services
 
         public bool IsPythonDetected()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return ExecPath.TryRun("python3", "--version", null, out _, out _, 2000);
-            }
-
-            // Windows: try real binaries first, then shim variants (.bat/.cmd) used by pyenv-win.
-            foreach (string candidate in new[] {
-                "python.exe", "python3.exe",
-                "python.bat", "python3.bat",
-                "python.cmd", "python3.cmd"
-            })
-            {
-                if (ExecPath.TryRun(candidate, "--version", null, out _, out _, 2000))
-                {
-                    return true;
-                }
-            }
-            return false;
+            return ExecPath.TryRun(
+                RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "python.exe" : "python3",
+                "--version",
+                null,
+                out _,
+                out _,
+                2000);
         }
 
         public bool IsClaudeCliDetected()
@@ -275,26 +237,12 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // On Windows, a bare command name like "uvx" may resolve to .exe, .bat, or .cmd
-                // (pyenv-win publishes .bat shims on PATH). Probe each variant in turn.
-                IEnumerable<string> namesToProbe;
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName))
+                // Generic search for any command in PATH and common locations
+                foreach (string candidate in EnumerateCommandCandidates(commandName))
                 {
-                    namesToProbe = new[] { commandName + ".exe", commandName + ".bat", commandName + ".cmd" };
-                }
-                else
-                {
-                    namesToProbe = new[] { commandName };
-                }
-
-                foreach (string name in namesToProbe)
-                {
-                    foreach (string candidate in EnumerateCommandCandidates(name))
+                    if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
                     {
-                        if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
-                        {
-                            return candidate;
-                        }
+                        return candidate;
                     }
                 }
             }
@@ -306,26 +254,13 @@ namespace MCPForUnity.Editor.Services
             return null;
         }
 
-        private static bool HasExecutableExtension(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return false;
-            string ext = Path.GetExtension(name);
-            if (string.IsNullOrEmpty(ext)) return false;
-            return ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
-                   ext.Equals(".bat", StringComparison.OrdinalIgnoreCase) ||
-                   ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase);
-        }
-
         /// <summary>
         /// Enumerates candidate paths for a generic command name.
         /// Searches PATH and common locations.
         /// </summary>
         private static IEnumerable<string> EnumerateCommandCandidates(string commandName)
         {
-            // On Windows, only append ".exe" when no executable extension is present.
-            // Previously this also appended ".exe" to names like "uvx.bat", producing
-            // bogus probes such as "uvx.bat.exe".
-            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName)
+            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !commandName.EndsWith(".exe")
                 ? commandName + ".exe"
                 : commandName;
 

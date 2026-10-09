@@ -17,10 +17,7 @@ namespace MCPForUnity.Editor.Setup
     {
         private const string DefaultRepoUrl = "https://github.com/CoplayDev/unity-mcp";
         private const string PackageName = "com.coplaydev.unity-mcp";
-        // Prefer the top-level canonical skill source; the repo's dogfooding copy under
-        // .claude/skills can drift (fewer reference files, stale SKILL.md) and is only a fallback.
-        private const string SkillSubdir = "unity-mcp-skill";
-        private const string FallbackSkillSubdir = ".claude/skills/unity-mcp-skill";
+        private const string SkillSubdir = ".claude/skills/unity-mcp-skill";
         private const string SyncOwnershipMarker = ".unity-mcp-skill-sync";
         private const string LastSyncedCommitKeyPrefix = "UnityMcpSkillSync.LastSyncedCommit";
 
@@ -416,24 +413,24 @@ namespace MCPForUnity.Editor.Setup
                     $"-c core.longpaths=true clone --depth 1 --filter=blob:none --sparse --branch {QuoteProcessArgument(branch)} --single-branch {QuoteProcessArgument(repoUrl)} {QuoteProcessArgument(repoDir)}",
                     tempRoot,
                     log);
-                RunGit(
-                    $"sparse-checkout set {QuoteProcessArgument(SkillSubdir)} {QuoteProcessArgument(FallbackSkillSubdir)}",
-                    repoDir,
-                    log);
+                var normalizedSubdir = NormalizeRemotePath(subdir);
+                RunGit($"sparse-checkout set {QuoteProcessArgument(normalizedSubdir)}", repoDir, log);
                 var commitSha = RunGit("rev-parse HEAD", repoDir, log).Trim();
                 if (string.IsNullOrWhiteSpace(commitSha))
                 {
                     throw new InvalidOperationException("Failed to resolve cloned repository HEAD.");
                 }
 
-                var normalizedSubdir = NormalizeRemotePath(subdir);
-                var sourceRoot = ResolveExistingSkillSourceRoot(repoDir, normalizedSubdir);
-                var remoteFiles = new Dictionary<string, string>(StringComparer.Ordinal);
-                var sourceRootFullPath = Path.GetFullPath(sourceRoot);
-
-                foreach (var filePath in Directory.GetFiles(sourceRootFullPath, "*", SearchOption.AllDirectories))
+                var sourceRoot = ResolvePathUnderRoot(repoDir, normalizedSubdir, GetPathComparison(repoDir));
+                if (!Directory.Exists(sourceRoot))
                 {
-                    var relativePath = Path.GetRelativePath(sourceRootFullPath, filePath).Replace('\\', '/');
+                    throw new InvalidOperationException($"Remote directory not found: {normalizedSubdir}");
+                }
+
+                var remoteFiles = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var filePath in Directory.GetFiles(sourceRoot, "*", SearchOption.AllDirectories))
+                {
+                    var relativePath = Path.GetRelativePath(sourceRoot, filePath).Replace('\\', '/');
                     if (!TryNormalizeRelativePath(relativePath, out var safeRelativePath))
                     {
                         log?.Invoke($"Skip unsafe git path: {relativePath}");
@@ -448,43 +445,14 @@ namespace MCPForUnity.Editor.Setup
                     throw new InvalidOperationException($"Remote directory not found: {normalizedSubdir}");
                 }
 
-                var selectedSubdir = NormalizeRemotePath(Path.GetRelativePath(repoDir, sourceRootFullPath));
-                log?.Invoke($"Git sparse checkout source: {selectedSubdir}");
                 log?.Invoke($"Remote file count: {remoteFiles.Count}");
-                return new RemoteSnapshot(commitSha, selectedSubdir, remoteFiles, sourceRootFullPath, tempRoot);
+                return new RemoteSnapshot(commitSha, normalizedSubdir, remoteFiles, sourceRoot, tempRoot);
             }
             catch
             {
                 TryDeleteDirectory(tempRoot);
                 throw;
             }
-        }
-
-        private static string ResolveExistingSkillSourceRoot(string repoDir, string preferredSubdir)
-        {
-            var pathComparison = GetPathComparison(repoDir);
-            var candidates = new[]
-            {
-                preferredSubdir,
-                FallbackSkillSubdir
-            };
-
-            foreach (var candidate in candidates)
-            {
-                if (string.IsNullOrWhiteSpace(candidate))
-                {
-                    continue;
-                }
-
-                var sourceRoot = ResolvePathUnderRoot(repoDir, candidate, pathComparison);
-                if (Directory.Exists(sourceRoot))
-                {
-                    return sourceRoot;
-                }
-            }
-
-            throw new InvalidOperationException(
-                $"Remote skill directory not found. Checked: {preferredSubdir}, {FallbackSkillSubdir}");
         }
 
         private static string FetchBranchHeadCommitSha(HttpClient client, GitHubRepoInfo repoInfo, string branch, Action<string> log)
