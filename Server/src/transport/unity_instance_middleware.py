@@ -321,24 +321,10 @@ class UnityInstanceMiddleware(Middleware):
         from transport.unity_transport import _resolve_user_id_from_request
         return await _resolve_user_id_from_request()
 
-    @staticmethod
-    def _command_name_from_context(context: MiddlewareContext) -> str | None:
-        message = getattr(context, "message", None)
-        for attr in ("name", "tool_name", "command"):
-            value = getattr(message, attr, None)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        if isinstance(message, dict):
-            for key in ("name", "tool_name", "command"):
-                value = message.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
-        return None
-
     async def _inject_unity_instance(self, context: MiddlewareContext) -> None:
         """Inject active Unity instance and user_id into context if available."""
         ctx = context.fastmcp_context
-        command_name = self._command_name_from_context(context)
+        command_name = getattr(getattr(context, "message", None), "name", None)
 
         # Resolve user_id from the HTTP request's API key header
         user_id = await self._resolve_user_id()

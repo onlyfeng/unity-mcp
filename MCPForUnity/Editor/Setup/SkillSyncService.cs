@@ -1,22 +1,22 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
-using Newtonsoft.Json.Linq;
+using MCPForUnity.Editor.Helpers;
 using UnityEditor;
+using UnityEditor.PackageManager;
 using UnityEngine;
+using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 
 namespace MCPForUnity.Editor.Setup
 {
     public static class SkillSyncService
     {
         private const string DefaultRepoUrl = "https://github.com/CoplayDev/unity-mcp";
-        private const string PackageName = "com.coplaydev.unity-mcp";
         private const string SkillSubdir = ".claude/skills/unity-mcp-skill";
         private const string SyncOwnershipMarker = ".unity-mcp-skill-sync";
         private const string LastSyncedCommitKeyPrefix = "UnityMcpSkillSync.LastSyncedCommit";
@@ -139,9 +139,22 @@ namespace MCPForUnity.Editor.Setup
 
         internal static string GetDefaultRepoUrl()
         {
-            return TryGetPackageRepoUrlFromManifest(out var packageRepoUrl)
-                ? packageRepoUrl
-                : DefaultRepoUrl;
+            var packageInfo = PackageInfo.FindForAssembly(typeof(SkillSyncService).Assembly);
+            var repoUrl = packageInfo?.source == PackageSource.Git
+                ? GetRepoUrlFromPackageId(packageInfo.packageId)
+                : null;
+            return string.IsNullOrWhiteSpace(repoUrl) ? DefaultRepoUrl : repoUrl;
+        }
+
+        /// <summary>
+        /// A git-installed package's id is "name@" followed by the URL as written in
+        /// manifest.json, e.g. com.coplaydev.unity-mcp@https://host/org/unity-mcp.git?path=/MCPForUnity#beta.
+        /// Splits at the first '@' so scp-style URLs (git@host:org/repo.git) keep theirs.
+        /// </summary>
+        internal static string GetRepoUrlFromPackageId(string packageId)
+        {
+            var at = packageId?.IndexOf('@') ?? -1;
+            return at < 0 ? null : NormalizeGitPackageUrl(packageId.Substring(at + 1));
         }
 
         internal static string NormalizeGitPackageUrl(string repoUrl)
@@ -178,89 +191,6 @@ namespace MCPForUnity.Editor.Setup
             return value.StartsWith("git+", StringComparison.OrdinalIgnoreCase)
                 ? value.Substring(4)
                 : value;
-        }
-
-        private static bool TryGetPackageRepoUrlFromManifest(out string repoUrl)
-        {
-            repoUrl = string.Empty;
-            try
-            {
-                var manifestPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", "Packages", "manifest.json"));
-                if (!File.Exists(manifestPath))
-                {
-                    return false;
-                }
-
-                var manifest = JObject.Parse(File.ReadAllText(manifestPath));
-                var dependencyValue = manifest["dependencies"]?[PackageName]?.Value<string>();
-                if (string.IsNullOrWhiteSpace(dependencyValue) || !LooksLikeGitPackageUrl(dependencyValue))
-                {
-                    return false;
-                }
-
-                repoUrl = NormalizeGitPackageUrl(dependencyValue);
-                return !string.IsNullOrWhiteSpace(repoUrl);
-            }
-            catch
-            {
-                repoUrl = string.Empty;
-                return false;
-            }
-        }
-
-        private static bool LooksLikeGitPackageUrl(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return false;
-            }
-
-            var trimmed = value.Trim();
-            var hadGitPlusPrefix = trimmed.StartsWith("git+", StringComparison.OrdinalIgnoreCase);
-            if (hadGitPlusPrefix)
-            {
-                trimmed = trimmed.Substring(4);
-            }
-
-            if (trimmed.StartsWith("git@", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (!Uri.TryCreate(trimmed, UriKind.Absolute, out var uri))
-            {
-                return false;
-            }
-
-            if (string.Equals(uri.Scheme, "git", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(uri.Scheme, "ssh", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            var pathEndsWithDotGit = uri.AbsolutePath.EndsWith(".git", StringComparison.OrdinalIgnoreCase);
-
-            if (string.Equals(uri.Scheme, "file", StringComparison.OrdinalIgnoreCase))
-            {
-                // Unity manifests also use bare `file:` URIs for local folder dependencies;
-                // only treat them as git when explicitly marked via `git+` or pointing at a `.git` path.
-                return hadGitPlusPrefix || pathEndsWithDotGit;
-            }
-
-            if (!string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(uri.Scheme, "https", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (hadGitPlusPrefix)
-            {
-                return true;
-            }
-
-            return pathEndsWithDotGit ||
-                   uri.Host.IndexOf("github", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   uri.Host.IndexOf("gitlab", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static string GetLastSyncedCommitKey(string repoUrl, string branch)
@@ -410,11 +340,13 @@ namespace MCPForUnity.Editor.Setup
             {
                 log?.Invoke("Cloning skill source with git sparse checkout...");
                 RunGit(
-                    $"-c core.longpaths=true clone --depth 1 --filter=blob:none --sparse --branch {QuoteProcessArgument(branch)} --single-branch {QuoteProcessArgument(repoUrl)} {QuoteProcessArgument(repoDir)}",
+                    "-c core.longpaths=true clone --depth 1 --filter=blob:none --sparse " +
+                    $"--branch {AssetPathUtility.QuoteCommandLineArg(branch)} --single-branch " +
+                    $"{AssetPathUtility.QuoteCommandLineArg(repoUrl)} {AssetPathUtility.QuoteCommandLineArg(repoDir)}",
                     tempRoot,
                     log);
                 var normalizedSubdir = NormalizeRemotePath(subdir);
-                RunGit($"sparse-checkout set {QuoteProcessArgument(normalizedSubdir)}", repoDir, log);
+                RunGit($"sparse-checkout set {AssetPathUtility.QuoteCommandLineArg(normalizedSubdir)}", repoDir, log);
                 var commitSha = RunGit("rev-parse HEAD", repoDir, log).Trim();
                 if (string.IsNullOrWhiteSpace(commitSha))
                 {
@@ -693,94 +625,21 @@ namespace MCPForUnity.Editor.Setup
 
         private static string RunGit(string arguments, string workingDir, Action<string> log)
         {
-            return RunProcess("git", arguments, workingDir, log);
-        }
-
-        private static string RunProcess(string fileName, string arguments, string workingDir, Action<string> log)
-        {
-            var startInfo = new ProcessStartInfo
+            if (!ExecPath.TryRun("git", arguments, workingDir, out var stdout, out var stderr, timeoutMs: 120000))
             {
-                FileName = fileName,
-                Arguments = arguments,
-                WorkingDirectory = string.IsNullOrEmpty(workingDir) ? Environment.CurrentDirectory : workingDir,
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = false };
-            var stdout = new StringBuilder();
-            var stderr = new StringBuilder();
-            process.OutputDataReceived += (_, e) =>
-            {
-                if (e.Data != null)
-                {
-                    stdout.AppendLine(e.Data);
-                }
-            };
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (e.Data != null)
-                {
-                    stderr.AppendLine(e.Data);
-                }
-            };
-
-            if (!process.Start())
-            {
-                throw new InvalidOperationException($"Failed to start process: {fileName}");
-            }
-
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-
-            if (!process.WaitForExit(120000))
-            {
-                try
-                {
-                    process.Kill();
-                }
-                catch
-                {
-                }
-
-                throw new TimeoutException($"Process timed out: {fileName} {arguments}");
-            }
-
-            process.WaitForExit();
-            var stderrText = stderr.ToString().Trim();
-            if (!string.IsNullOrWhiteSpace(stderrText))
-            {
-                log?.Invoke(stderrText);
-            }
-
-            if (process.ExitCode != 0)
-            {
-                var stdoutText = stdout.ToString().Trim();
-                var details = string.Join("\n", new[] { stdoutText, stderrText }.Where(s => !string.IsNullOrWhiteSpace(s)));
+                var details = string.Join("\n", new[] { stdout.Trim(), stderr.Trim() }.Where(s => s.Length > 0));
                 throw new InvalidOperationException(
-                    string.IsNullOrWhiteSpace(details)
-                        ? $"Process failed with exit code {process.ExitCode}: {fileName} {arguments}"
-                        : $"Process failed with exit code {process.ExitCode}: {fileName} {arguments}\n{details}");
+                    string.IsNullOrEmpty(details)
+                        ? $"git {arguments} failed or timed out."
+                        : $"git {arguments} failed:\n{details}");
             }
 
-            return stdout.ToString();
-        }
-
-        private static string QuoteProcessArgument(string argument)
-        {
-            if (string.IsNullOrEmpty(argument))
+            if (!string.IsNullOrWhiteSpace(stderr))
             {
-                return "\"\"";
+                log?.Invoke(stderr.Trim());
             }
 
-            if (argument.IndexOfAny(new[] { ' ', '\t', '\n', '\r', '"' }) < 0)
-            {
-                return argument;
-            }
-
-            return $"\"{argument.Replace("\"", "\\\"")}\"";
+            return stdout;
         }
 
         private static void ValidateFileHashes(string installRoot, Dictionary<string, string> remoteFiles, StringComparison pathComparison, Action<string> log)

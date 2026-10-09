@@ -662,16 +662,19 @@ async def test_protected_terminal_snapshot_refreshes_lru_recency(monkeypatch):
     monkeypatch.setattr(
         mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
 
+    def key(job_id):
+        return (mod.config.transport_mode, "", "", job_id)
+
     # A: high-detail terminal, then B: terminal -> cache order [A, B]
     await get_test_job(DummyContext(), job_id="A", include_details=True)
     await get_test_job(DummyContext(), job_id="B", include_details=True)
-    assert list(mod._test_job_status_cache) == [("default", "A"), ("default", "B")]
+    assert list(mod._test_job_status_cache) == [key("A"), key("B")]
 
     # Low-detail poll of A must not clobber its richer snapshot, and must move it
     # to the most-recent position -> [B, A].
     await get_test_job(DummyContext(), job_id="A")
-    assert list(mod._test_job_status_cache) == [("default", "B"), ("default", "A")]
-    assert mod._test_job_status_cache[("default", "A")]["details"] is True  # richer snapshot kept
+    assert list(mod._test_job_status_cache) == [key("B"), key("A")]
+    assert mod._test_job_status_cache[key("A")]["details"] is True  # richer snapshot kept
 
 
 @pytest.mark.asyncio
@@ -801,6 +804,8 @@ async def test_cached_test_jobs_are_scoped_by_user_for_same_instance(monkeypatch
     user = {"id": "user-a"}
     monkeypatch.setattr(
         mod.unity_transport, "send_with_unity_instance", fake_send_with_unity_instance)
+    # user_id is only resolved from API keys when remote-hosted.
+    monkeypatch.setattr(mod.config, "http_remote_hosted", True)
 
     ctx_a = DummyContext()
     await ctx_a.set_state("user_id", "user-a")

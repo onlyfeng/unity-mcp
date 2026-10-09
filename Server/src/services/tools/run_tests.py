@@ -36,34 +36,15 @@ _SERVER_STUCK_SUSPECTED_MS = 30_000
 # flags record the detail level the snapshot was fetched with (include_details /
 # include_failed_tests). They change Unity's serialized payload, so a low-detail
 # snapshot must not be served as authoritative for a higher-detail poll.
-_test_job_status_cache: dict[tuple[str, str], dict[str, Any]] = {}
+_test_job_status_cache: OrderedDict[tuple[str, str, str, str], dict[str, Any]] = OrderedDict()
 _TERMINAL_TEST_JOB_STATUSES = ("succeeded", "failed", "cancelled")
 
 
-async def _get_test_job_cache_scope(ctx: Context, unity_instance: str | None) -> str:
-    get_state_fn = getattr(ctx, "get_state", None)
-
-    async def _state_value(key: str) -> str | None:
-        if not callable(get_state_fn):
-            return None
-        try:
-            value = await get_state_fn(key)
-        except Exception:
-            return None
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    user_id = await _state_value("user_id")
-    instance = (unity_instance or "").strip()
-    if user_id and instance:
-        return f"user:{user_id}|instance:{instance}"
-    if instance:
-        return f"instance:{instance}"
-    if user_id:
-        return f"user:{user_id}|instance:default"
-    return "default"
+def _test_job_cache_scope(unity_instance: str | None, user_id: str | None) -> tuple[str, str, str]:
+    """Same identity as the focus-nudge key: the instance hash stays stable across
+    the session reconnects of a domain reload, and user_id is only set when
+    remote-hosted callers share an instance."""
+    return (config.transport_mode, user_id or "", (unity_instance or "").rpartition("@")[2])
 
 
 def _detail_satisfies(cached_details: bool, cached_failed: bool,
@@ -79,7 +60,7 @@ def _detail_satisfies(cached_details: bool, cached_failed: bool,
 
 
 def _cached_terminal_test_job_response(
-    cache_scope: str, job_id: str, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: tuple[str, str, str], job_id: str, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> dict[str, Any] | None:
     """Return a clean success response if a terminal snapshot is cached for the
     job AND it was fetched with enough detail to satisfy this poll. Terminal
@@ -87,7 +68,7 @@ def _cached_terminal_test_job_response(
     transport stall need not wait out wait_timeout to learn the result; the
     cached status is authoritative. A less-detailed snapshot is not, so we fall
     through to the degraded/retry path when more detail was requested."""
-    entry = _test_job_status_cache.get((cache_scope, job_id))
+    entry = _test_job_status_cache.get((*cache_scope, job_id))
     if not entry:
         return None
     snapshot = entry["data"]
@@ -100,7 +81,7 @@ def _cached_terminal_test_job_response(
 
 
 def _remember_test_job_data(
-    cache_scope: str, data: Any, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: tuple[str, str, str], data: Any, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> None:
     if not isinstance(data, dict):
         return
@@ -121,7 +102,7 @@ def _remember_test_job_data(
     # A terminal job's results are final, so a richer terminal snapshot must not
     # be clobbered by a later lower-detail poll of the same job — otherwise a
     # subsequent high-detail request would lose results we already had.
-    cache_key = (cache_scope, job_id)
+    cache_key = (*cache_scope, job_id)
     existing = _test_job_status_cache.get(cache_key)
     if (existing is not None
             and existing["data"].get("status") in _TERMINAL_TEST_JOB_STATUSES
@@ -130,17 +111,13 @@ def _remember_test_job_data(
                                       existing["details"], existing["failed"])):
         # Keep the richer snapshot, but refresh its recency so the protection
         # isn't quietly undone by LRU eviction on a later poll.
-        _test_job_status_cache[cache_key] = _test_job_status_cache.pop(cache_key)
+        _test_job_status_cache.move_to_end(cache_key)
         return
 
-    _test_job_status_cache.pop(cache_key, None)
     _test_job_status_cache[cache_key] = entry
-
+    _test_job_status_cache.move_to_end(cache_key)
     while len(_test_job_status_cache) > _MAX_CACHED_TEST_JOBS:
-        oldest = next(iter(_test_job_status_cache), None)
-        if oldest is None:
-            break
-        _test_job_status_cache.pop(oldest, None)
+        _test_job_status_cache.popitem(last=False)
 
 
 def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
@@ -159,9 +136,9 @@ def _is_retryable_transport_failure(response: dict[str, Any]) -> bool:
 
 
 def _cached_test_job_response(
-    cache_scope: str, job_id: str, error: Any, *, include_details: bool = False, include_failed_tests: bool = False
+    cache_scope: tuple[str, str, str], job_id: str, error: Any, *, include_details: bool = False, include_failed_tests: bool = False
 ) -> dict[str, Any] | None:
-    entry = _test_job_status_cache.get((cache_scope, job_id))
+    entry = _test_job_status_cache.get((*cache_scope, job_id))
     if not entry:
         return None
 
@@ -558,7 +535,8 @@ async def run_tests(
     if init_timeout is not None and init_timeout <= 0:
         return MCPResponse(success=False, error="init_timeout must be a positive integer (milliseconds) or None")
 
-    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
+    user_id = await ctx.get_state("user_id") if config.http_remote_hosted else None
+    cache_scope = _test_job_cache_scope(unity_instance, user_id)
     gate = await preflight(ctx, requires_no_tests=True, wait_for_no_compile=True, refresh_if_dirty=True)
     if isinstance(gate, MCPResponse):
         return gate
@@ -633,8 +611,8 @@ async def get_test_job(
                             "Recommended: 30-60 seconds. Returns immediately if tests complete sooner."] = None,
 ) -> GetTestJobResponse | MCPResponse:
     unity_instance = await get_unity_instance_from_context(ctx)
-    cache_scope = await _get_test_job_cache_scope(ctx, unity_instance)
     user_id = await ctx.get_state("user_id") if config.http_remote_hosted else None
+    cache_scope = _test_job_cache_scope(unity_instance, user_id)
 
     params: dict[str, Any] = {"job_id": job_id}
     if include_failed_tests:
