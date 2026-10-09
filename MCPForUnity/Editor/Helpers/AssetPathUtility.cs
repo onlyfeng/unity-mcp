@@ -393,7 +393,7 @@ namespace MCPForUnity.Editor.Helpers
         /// uvx fast path is equivalent to "uv tool run", so this restores compatibility
         /// when PathResolver falls back to uv.
         /// </summary>
-        private static IReadOnlyList<string> GetUvToolRunPrefixArgs(string uvxPath)
+        internal static IReadOnlyList<string> GetUvToolRunPrefixArgs(string uvxPath)
         {
             if (string.IsNullOrEmpty(uvxPath))
                 return Array.Empty<string>();
