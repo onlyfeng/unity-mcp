@@ -84,19 +84,7 @@ namespace MCPForUnity.Editor.Services
 
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    if (!_windowsShimFallbackResolved)
-                    {
-                        string pyenvRoot = GetPyenvWinRoot();
-                        var shimDirs = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
-                            .Split(Path.PathSeparator)
-                            .Select(dir => dir.Trim())
-                            .Where(dir => dir.Length > 0)
-                            .ToList();
-                        shimDirs.Add(Path.Combine(pyenvRoot, "shims"));
-                        _windowsShimFallback = ResolveUvxBehindPyenvShim(pyenvRoot) ?? FindUvShim(shimDirs);
-                        _windowsShimFallbackResolved = true;
-                    }
-                    return _windowsShimFallback;
+                    return ResolveWindowsShimFallback();
                 }
             }
             catch (Exception ex)
@@ -107,9 +95,39 @@ namespace MCPForUnity.Editor.Services
             return null;
         }
 
-        // pyenv-win is slow to start, so the Windows shim fallback is resolved once per domain.
-        private static bool _windowsShimFallbackResolved;
+        private static readonly TimeSpan ShimFallbackRecheckInterval = TimeSpan.FromSeconds(30);
         private static string _windowsShimFallback;
+        private static DateTime _windowsShimFallbackCheckedAt;
+
+        /// <summary>
+        /// Resolves uv behind pyenv-win (or any .bat/.cmd shim) once no uvx.exe/uv.exe is on PATH.
+        /// Running pyenv-win is slow, so a resolved .exe is reused while it exists, and a bare shim
+        /// (pyenv could not resolve it) is re-checked after a short interval so fixing pyenv is picked
+        /// up without a domain reload. A miss never ran pyenv and is cheap to repeat, so it is not
+        /// cached: uv installed into pyenv later is found on the next lookup.
+        /// </summary>
+        private static string ResolveWindowsShimFallback()
+        {
+            string cached = _windowsShimFallback;
+            if (cached != null && File.Exists(cached) &&
+                (cached.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                 DateTime.UtcNow - _windowsShimFallbackCheckedAt < ShimFallbackRecheckInterval))
+            {
+                return cached;
+            }
+
+            string pyenvRoot = GetPyenvWinRoot();
+            var shimDirs = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator)
+                .Select(dir => dir.Trim())
+                .Where(dir => dir.Length > 0)
+                .ToList();
+            shimDirs.Add(Path.Combine(pyenvRoot, "shims"));
+
+            _windowsShimFallback = ResolveUvxBehindPyenvShim(pyenvRoot) ?? FindUvShim(shimDirs);
+            _windowsShimFallbackCheckedAt = DateTime.UtcNow;
+            return _windowsShimFallback;
+        }
 
         private static string GetPyenvWinRoot()
         {
