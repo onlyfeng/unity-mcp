@@ -381,23 +381,23 @@ namespace MCPForUnity.Editor.Windows.Components.ClientConfig
             bool isCurrentlyConfigured = client.Status == McpStatus.Configured;
             ApplyStatusToUi(client, showChecking: true, customMessage: isCurrentlyConfigured ? "Unregistering..." : "Configuring...");
 
-            // Preflight: refuse to register a stdio server command we already know is broken
-            // (no uvx, a Windows pyenv shim, a network/cert failure). Runs synchronously on
-            // the main thread before we spawn the background `claude mcp add` call so we
-            // never end up writing a bad config that Claude Code would try to launch later.
+            // Refuse to register a stdio command with no uvx, or one that launches uvx through a
+            // Windows .bat/.cmd shim. Checked here on the main thread, before the background
+            // `claude mcp add`, which removes existing registrations before adding.
             if (!isCurrentlyConfigured && !EditorConfigurationCache.Instance.UseHttpTransport)
             {
-                string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
-                if (!string.IsNullOrEmpty(preflightError))
+                string launcherError = McpConfigurationHelper.GetStdioLauncherError(
+                    MCPServiceLocator.Paths.GetUvxPath(), useStdio: true);
+                if (!string.IsNullOrEmpty(launcherError))
                 {
                     statusRefreshInFlight.Remove(client);
                     if (client is McpClientConfiguratorBase baseConfigurator)
                     {
-                        baseConfigurator.Client.SetStatus(McpStatus.Error, preflightError);
+                        baseConfigurator.Client.SetStatus(McpStatus.Error, launcherError);
                     }
-                    McpLog.Error($"Configuration failed: {preflightError}");
+                    McpLog.Error($"Configuration failed: {launcherError}");
                     ApplyStatusToUi(client);
-                    EditorUtility.DisplayDialog("Configuration Failed", preflightError, "OK");
+                    EditorUtility.DisplayDialog("Configuration Failed", launcherError, "OK");
                     UpdateManualConfiguration();
                     return;
                 }

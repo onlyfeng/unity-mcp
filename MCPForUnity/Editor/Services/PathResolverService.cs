@@ -17,33 +17,15 @@ namespace MCPForUnity.Editor.Services
     public class PathResolverService : IPathResolverService
     {
         private bool _hasUvxPathFallback;
-        private bool _resolvedUvxIsShim;
 
         public bool HasUvxPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.UvxPathOverride, null));
         public bool HasClaudeCliPathOverride => !string.IsNullOrEmpty(EditorPrefs.GetString(EditorPrefKeys.ClaudeCliPathOverride, null));
         public bool HasUvxPathFallback => _hasUvxPathFallback;
-        public bool ResolvedUvxIsShim => _resolvedUvxIsShim;
-
-        /// <summary>
-        /// Returns true if a path points to a Windows .bat/.cmd shim (e.g. pyenv-win's
-        /// uvx.bat / uv.cmd). Shim launchers route arguments through cmd.exe, which
-        /// interprets shell metacharacters in our args — most notably the '>' in
-        /// "mcpforunityserver&gt;=0.0.0a0" is parsed as stdout redirection, leaving uvx
-        /// with a bare "--from" and no value. Configurators should emit real .exe paths
-        /// in client configs and treat shim resolution as a fallback only.
-        /// </summary>
-        public static bool IsShimPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return false;
-            return path.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
-                || path.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase);
-        }
 
         public string GetUvxPath()
         {
-            // Reset transient flags at the start of each resolution
+            // Reset fallback flag at the start of each resolution
             _hasUvxPathFallback = false;
-            _resolvedUvxIsShim = false;
 
             // Check override first - only validate if explicitly set
             if (HasUvxPathOverride)
@@ -52,7 +34,6 @@ namespace MCPForUnity.Editor.Services
                 // Validate the override - if invalid, fall back to system discovery
                 if (TryValidateUvxExecutable(overridePath, out string version))
                 {
-                    _resolvedUvxIsShim = IsShimPath(overridePath);
                     return overridePath;
                 }
                 // Override is set but invalid - fall back to system discovery
@@ -60,18 +41,16 @@ namespace MCPForUnity.Editor.Services
                 if (!string.IsNullOrEmpty(fallbackPath))
                 {
                     _hasUvxPathFallback = true;
-                    _resolvedUvxIsShim = IsShimPath(fallbackPath);
                     return fallbackPath;
                 }
                 // Return null to indicate override is invalid and no system fallback found
                 return null;
             }
 
-            // No override set - try discovery (uvx.exe before uvx.bat/.cmd, then uv variants)
+            // No override set - try discovery (uvx first, then uv)
             string discovered = ResolveUvxFromSystem();
             if (!string.IsNullOrEmpty(discovered))
             {
-                _resolvedUvxIsShim = IsShimPath(discovered);
                 return discovered;
             }
 
@@ -87,15 +66,9 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // Probe order on Windows: every real .exe before any .bat/.cmd shim,
-                // even across the uvx/uv family boundary. PreflightStdioServerLaunchIfNeeded
-                // now hard-rejects .bat / .cmd commands (cmd.exe corrupts the '>' in
-                // "mcpforunityserver>=0.0.0a0"), so ranking uvx.bat above uv.exe would
-                // convert a runnable "uv.exe + uvx.bat" host into a blocking error.
-                // AssetPathUtility.BuildUvxServerLaunchArgs prepends "tool run" when the
-                // resolved launcher is uv.*, so uv.exe with uvx-style args still works.
+                // Try uvx first, then uv
                 string[] commandNames = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-                    ? new[] { "uvx.exe", "uv.exe", "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" }
+                    ? new[] { "uvx.exe", "uv.exe" }
                     : new[] { "uvx", "uv" };
 
                 foreach (string commandName in commandNames)
@@ -108,12 +81,112 @@ namespace MCPForUnity.Editor.Services
                         }
                     }
                 }
+
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    return ResolveWindowsShimFallback();
+                }
             }
             catch (Exception ex)
             {
                 McpLog.Debug($"PathResolver error: {ex.Message}");
             }
 
+            return null;
+        }
+
+        private static readonly TimeSpan ShimFallbackRecheckInterval = TimeSpan.FromSeconds(30);
+        private static string _windowsShimFallback;
+        private static DateTime _windowsShimFallbackCheckedAt;
+
+        /// <summary>
+        /// Resolves uv behind pyenv-win (or any .bat/.cmd shim) once no uvx.exe/uv.exe is on PATH.
+        /// Running pyenv-win is slow, so a resolved .exe is reused while it exists, and a bare shim
+        /// (pyenv could not resolve it) is re-checked after a short interval so fixing pyenv is picked
+        /// up without a domain reload. A miss never ran pyenv and is cheap to repeat, so it is not
+        /// cached: uv installed into pyenv later is found on the next lookup.
+        /// </summary>
+        private static string ResolveWindowsShimFallback()
+        {
+            string cached = _windowsShimFallback;
+            if (cached != null && File.Exists(cached) &&
+                (cached.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ||
+                 DateTime.UtcNow - _windowsShimFallbackCheckedAt < ShimFallbackRecheckInterval))
+            {
+                return cached;
+            }
+
+            string pyenvRoot = GetPyenvWinRoot();
+            var shimDirs = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                .Split(Path.PathSeparator)
+                .Select(dir => dir.Trim())
+                .Where(dir => dir.Length > 0)
+                .ToList();
+            shimDirs.Add(Path.Combine(pyenvRoot, "shims"));
+
+            _windowsShimFallback = ResolveUvxBehindPyenvShim(pyenvRoot) ?? FindUvShim(shimDirs);
+            _windowsShimFallbackCheckedAt = DateTime.UtcNow;
+            return _windowsShimFallback;
+        }
+
+        private static string GetPyenvWinRoot()
+        {
+            string pyenvRoot = Environment.GetEnvironmentVariable("PYENV");
+            return string.IsNullOrEmpty(pyenvRoot)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pyenv", "pyenv-win")
+                : pyenvRoot;
+        }
+
+        /// <summary>
+        /// pyenv-win exposes uv only as .bat shims (shims\uvx.bat). MCP clients launch those
+        /// through cmd.exe, which parses the '>' in "mcpforunityserver>=0.0.0a0" as redirection,
+        /// so ask pyenv for the real uvx.exe/uv.exe behind the shim instead.
+        /// Returns null when pyenv-win or a uv shim is absent, or pyenv can't resolve one.
+        /// </summary>
+        internal static string ResolveUvxBehindPyenvShim(string pyenvRoot)
+        {
+            if (string.IsNullOrEmpty(pyenvRoot))
+                return null;
+
+            string pyenvBat = Path.Combine(pyenvRoot, "bin", "pyenv.bat");
+            if (!File.Exists(pyenvBat))
+                return null;
+
+            foreach (string command in new[] { "uvx", "uv" })
+            {
+                if (!File.Exists(Path.Combine(pyenvRoot, "shims", command + ".bat")))
+                    continue;
+                if (!ExecPath.TryRun(pyenvBat, $"which {command}", null, out string stdout, out _, timeoutMs: 10000))
+                    continue;
+
+                string path = stdout.Split('\n').Select(line => line.Trim()).LastOrDefault(line => line.Length > 0);
+                if (!string.IsNullOrEmpty(path) &&
+                    path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(path))
+                {
+                    return path;
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
+        /// Returns the first uv .bat/.cmd shim in <paramref name="searchDirs"/>. Surfacing the shim,
+        /// rather than the bare "uvx" fallback, lets stdio configurators reject it with a clear
+        /// message instead of persisting a command the MCP client would run through cmd.exe.
+        /// </summary>
+        internal static string FindUvShim(IReadOnlyList<string> searchDirs)
+        {
+            foreach (string name in new[] { "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" })
+            {
+                foreach (string dir in searchDirs)
+                {
+                    string candidate = Path.Combine(dir, name);
+                    if (File.Exists(candidate))
+                        return candidate;
+                }
+            }
             return null;
         }
 
@@ -142,24 +215,13 @@ namespace MCPForUnity.Editor.Services
 
         public bool IsPythonDetected()
         {
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return ExecPath.TryRun("python3", "--version", null, out _, out _, 2000);
-            }
-
-            // Windows: try real binaries first, then shim variants (.bat/.cmd) used by pyenv-win.
-            foreach (string candidate in new[] {
-                "python.exe", "python3.exe",
-                "python.bat", "python3.bat",
-                "python.cmd", "python3.cmd"
-            })
-            {
-                if (ExecPath.TryRun(candidate, "--version", null, out _, out _, 2000))
-                {
-                    return true;
-                }
-            }
-            return false;
+            return ExecPath.TryRun(
+                RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "python.exe" : "python3",
+                "--version",
+                null,
+                out _,
+                out _,
+                2000);
         }
 
         public bool IsClaudeCliDetected()
@@ -275,26 +337,12 @@ namespace MCPForUnity.Editor.Services
         {
             try
             {
-                // On Windows, a bare command name like "uvx" may resolve to .exe, .bat, or .cmd
-                // (pyenv-win publishes .bat shims on PATH). Probe each variant in turn.
-                IEnumerable<string> namesToProbe;
-                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName))
+                // Generic search for any command in PATH and common locations
+                foreach (string candidate in EnumerateCommandCandidates(commandName))
                 {
-                    namesToProbe = new[] { commandName + ".exe", commandName + ".bat", commandName + ".cmd" };
-                }
-                else
-                {
-                    namesToProbe = new[] { commandName };
-                }
-
-                foreach (string name in namesToProbe)
-                {
-                    foreach (string candidate in EnumerateCommandCandidates(name))
+                    if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
                     {
-                        if (!string.IsNullOrEmpty(candidate) && File.Exists(candidate))
-                        {
-                            return candidate;
-                        }
+                        return candidate;
                     }
                 }
             }
@@ -306,26 +354,13 @@ namespace MCPForUnity.Editor.Services
             return null;
         }
 
-        private static bool HasExecutableExtension(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return false;
-            string ext = Path.GetExtension(name);
-            if (string.IsNullOrEmpty(ext)) return false;
-            return ext.Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
-                   ext.Equals(".bat", StringComparison.OrdinalIgnoreCase) ||
-                   ext.Equals(".cmd", StringComparison.OrdinalIgnoreCase);
-        }
-
         /// <summary>
         /// Enumerates candidate paths for a generic command name.
         /// Searches PATH and common locations.
         /// </summary>
         private static IEnumerable<string> EnumerateCommandCandidates(string commandName)
         {
-            // On Windows, only append ".exe" when no executable extension is present.
-            // Previously this also appended ".exe" to names like "uvx.bat", producing
-            // bogus probes such as "uvx.bat.exe".
-            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !HasExecutableExtension(commandName)
+            string exeName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !commandName.EndsWith(".exe")
                 ? commandName + ".exe"
                 : commandName;
 

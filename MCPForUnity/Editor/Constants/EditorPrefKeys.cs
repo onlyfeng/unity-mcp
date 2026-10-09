@@ -24,13 +24,9 @@ namespace MCPForUnity.Editor.Constants
         internal const string ClientProjectDirOverride = "MCPForUnity.ClientProjectDir";
 
         /// <summary>
-        /// Tri-state preference controlling whether emitted uvx commands include
-        /// <c>--system-certs</c>. Values:
-        ///   "auto"   - append when a corporate-CA environment variable is detected
-        ///              (SSL_CERT_FILE, REQUESTS_CA_BUNDLE, CURL_CA_BUNDLE,
-        ///              NODE_EXTRA_CA_CERTS). This is the default.
-        ///   "always" - always append.
-        ///   "never"  - never append.
+        /// Overrides whether emitted uvx commands include <c>--system-certs</c> (<c>--native-tls</c> on
+        /// uv older than 0.11): "always", "never", or anything else (default) to auto-detect a
+        /// corporate CA from the environment.
         /// </summary>
         internal const string UseSystemCertificates = "MCPForUnity.UseSystemCertificates";
 

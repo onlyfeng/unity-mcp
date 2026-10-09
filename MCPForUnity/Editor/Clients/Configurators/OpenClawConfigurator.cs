@@ -104,13 +104,12 @@ namespace MCPForUnity.Editor.Clients.Configurators
             if (EditorPrefs.GetBool(EditorPrefKeys.LockCursorConfig, false))
                 return;
 
-            // Preflight stdio uvx launch before touching disk. Same rationale as the
-            // other configurators: do it in the write path only, not in BuildUnityServerEntry
-            // (which is also called from GetManualSnippet for copy-only flows).
-            string preflightError = McpConfigurationHelper.PreflightStdioServerLaunchIfNeeded();
-            if (!string.IsNullOrEmpty(preflightError))
+            // Checked in the write path only, not in BuildUnityServerEntry, which also
+            // backs GetManualSnippet for copy-only flows.
+            string launcherError = McpConfigurationHelper.GetStdioLauncherError();
+            if (!string.IsNullOrEmpty(launcherError))
             {
-                client.SetStatus(McpStatus.Error, preflightError);
+                client.SetStatus(McpStatus.Error, launcherError);
                 return;
             }
 

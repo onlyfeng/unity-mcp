@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using MCPForUnity.Editor.Constants;
 using MCPForUnity.Editor.Services;
 using Newtonsoft.Json.Linq;
@@ -318,12 +319,11 @@ namespace MCPForUnity.Editor.Helpers
         }
 
         /// <summary>
-        /// Environment variables commonly set by corporate / Zscaler / Netskope style
-        /// proxies and by python tooling running behind a custom CA chain. When any of
-        /// these is non-empty we treat the host as needing <c>uvx --system-certs</c>
-        /// so PyPI fetches honour the OS certificate store instead of uv's bundled roots.
+        /// Environment variables set by corporate TLS-inspecting proxies (Zscaler, Netskope, ...)
+        /// and by tooling behind a custom CA chain. When any is set, uv is told to trust the OS
+        /// certificate store so PyPI fetches succeed behind the proxy.
         /// </summary>
-        private static readonly string[] SystemCertEnvVars = new[]
+        private static readonly string[] CorporateCaEnvVars =
         {
             "SSL_CERT_FILE",
             "REQUESTS_CA_BUNDLE",
@@ -331,57 +331,59 @@ namespace MCPForUnity.Editor.Helpers
             "NODE_EXTRA_CA_CERTS",
         };
 
-        /// <summary>
-        /// Returns true if generated uvx commands should include the <c>--system-certs</c>
-        /// flag. Driven by the <see cref="EditorPrefKeys.UseSystemCertificates"/> tri-state
-        /// preference; defaults to "auto" which auto-detects a corporate CA environment.
-        /// MUST be called from the main thread (reads EditorPrefs).
-        /// </summary>
-        public static bool ShouldUseSystemCerts()
-        {
-            string mode = "auto";
-            try { mode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, "auto"); } catch { }
-            return ShouldUseSystemCerts(mode);
-        }
+        private static string _systemCertsFlagUvxPath;
+        private static string _systemCertsFlag;
 
         /// <summary>
-        /// Thread-safe overload. Pass a pre-captured tri-state value ("auto"/"always"/"never").
+        /// Returns the uv flag that makes it trust the OS certificate store, or nothing.
+        /// <see cref="EditorPrefKeys.UseSystemCertificates"/> forces it on or off for proxies whose
+        /// CA lives only in the OS trust store, where no environment variable gives it away.
         /// </summary>
-        public static bool ShouldUseSystemCerts(string mode)
+        private static IReadOnlyList<string> GetSystemCertsArgs(string uvxPath)
         {
-            if (string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            foreach (string name in SystemCertEnvVars)
+            string mode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, "auto");
+            bool enabled = string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase);
+            if (!enabled && !string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
             {
-                try
+                foreach (string name in CorporateCaEnvVars)
                 {
-                    string value = Environment.GetEnvironmentVariable(name);
-                    if (!string.IsNullOrEmpty(value))
-                        return true;
+                    if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
+                    {
+                        enabled = true;
+                        break;
+                    }
                 }
-                catch { }
             }
-            return false;
+            if (!enabled)
+                return Array.Empty<string>();
+
+            if (_systemCertsFlag == null || _systemCertsFlagUvxPath != uvxPath)
+            {
+                MCPServiceLocator.Paths.TryValidateUvxExecutable(uvxPath, out string version);
+                _systemCertsFlag = SelectSystemCertsFlag(version);
+                _systemCertsFlagUvxPath = uvxPath;
+            }
+            return new[] { _systemCertsFlag };
         }
 
         /// <summary>
-        /// Returns the uvx system-cert flag arguments as a list. Empty when disabled.
+        /// uv 0.11 renamed <c>--native-tls</c> to <c>--system-certs</c>; the old name is deprecated
+        /// but behaves identically. Emit <c>--system-certs</c> wherever it exists, so configs written
+        /// by earlier builds of this package stay unchanged and survive the old name's removal, and
+        /// fall back to <c>--native-tls</c> only for uv that predates the rename. An unknown version
+        /// keeps <c>--system-certs</c>.
         /// </summary>
-        public static IReadOnlyList<string> GetSystemCertsArgsList()
+        internal static string SelectSystemCertsFlag(string uvVersion)
         {
-            return ShouldUseSystemCerts() ? new[] { "--system-certs" } : Array.Empty<string>();
-        }
-
-        /// <summary>
-        /// Returns the uvx system-cert flag as a trailing-space string, suitable for
-        /// concatenation into command-line builders (mirrors <see cref="GetUvxDevFlags()"/>).
-        /// </summary>
-        public static string GetSystemCertsArgs()
-        {
-            return ShouldUseSystemCerts() ? "--system-certs " : string.Empty;
+            Version parsed = null;
+            if (!string.IsNullOrEmpty(uvVersion))
+            {
+                int end = 0;
+                while (end < uvVersion.Length && (char.IsDigit(uvVersion[end]) || uvVersion[end] == '.'))
+                    end++;
+                Version.TryParse(uvVersion.Substring(0, end), out parsed);
+            }
+            return parsed != null && parsed < new Version(0, 11) ? "--native-tls" : "--system-certs";
         }
 
         /// <summary>
@@ -389,7 +391,7 @@ namespace MCPForUnity.Editor.Helpers
         /// uvx-style args ("--from &lt;src&gt; mcp-for-unity") work — uv's top-level CLI is
         /// "uv [OPTIONS] &lt;COMMAND&gt;", so calling "uv --from ..." directly fails. The
         /// uvx fast path is equivalent to "uv tool run", so this restores compatibility
-        /// when PathResolver falls back to uv.exe / uv.bat / uv.cmd.
+        /// when PathResolver falls back to uv.
         /// </summary>
         private static IReadOnlyList<string> GetUvToolRunPrefixArgs(string uvxPath)
         {
@@ -407,9 +409,9 @@ namespace MCPForUnity.Editor.Helpers
         /// Single source of truth for uvx args used to launch the MCP for Unity server.
         /// Centralizing this here ensures every client configurator (JSON, TOML, Claude CLI,
         /// OpenCode, etc.) emits an identical command shape:
-        ///   <c>uvx[.exe] --system-certs [--no-cache --refresh | --offline] --prerelease explicit
+        ///   <c>uvx[.exe] [--system-certs | --native-tls] [--no-cache --refresh | --offline] --prerelease explicit
         ///   --from mcpforunityserver&gt;=0.0.0a0 mcp-for-unity [--transport stdio]</c>
-        /// When PathResolver falls back to uv.* instead of uvx.*, a "tool run" prefix is
+        /// When PathResolver falls back to uv instead of uvx, a "tool run" prefix is
         /// inserted automatically. Per-configurator string-splicing of <c>--from</c> is
         /// forbidden; callers must use this builder so we keep the system-certs /
         /// prerelease / dev-flags ordering consistent.
@@ -423,7 +425,7 @@ namespace MCPForUnity.Editor.Helpers
             string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
             foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
                 args.Add(arg);
-            foreach (string flag in GetSystemCertsArgsList())
+            foreach (string flag in GetSystemCertsArgs(uvxPath))
                 args.Add(flag);
             foreach (string flag in GetUvxDevFlagsList())
                 args.Add(flag);
@@ -463,7 +465,23 @@ namespace MCPForUnity.Editor.Helpers
             if (!needsQuotes)
                 return arg;
 
-            return "\"" + arg.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+            // Windows argv rules: backslashes are literal unless they precede a quote, so only
+            // the runs before an embedded quote or the closing quote are doubled.
+            var sb = new StringBuilder("\"");
+            int backslashes = 0;
+            foreach (char c in arg)
+            {
+                if (c == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+                sb.Append('\\', c == '"' ? backslashes * 2 + 1 : backslashes);
+                sb.Append(c);
+                backslashes = 0;
+            }
+            sb.Append('\\', backslashes * 2);
+            return sb.Append('"').ToString();
         }
 
         /// <summary>
