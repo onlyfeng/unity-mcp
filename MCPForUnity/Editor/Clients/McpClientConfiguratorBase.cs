@@ -914,7 +914,7 @@ namespace MCPForUnity.Editor.Clients
             {
                 // Use --scope local to register in the project-local config, avoiding conflicts with user-level config (#664).
                 // `uvxLaunchArgs` was produced on the main thread by BuildUvxServerLaunchArgsString and already
-                // contains the native-tls / dev-flags / --prerelease / --from / package shape, plus the
+                // contains the system-certs / dev-flags / --prerelease / --from / package shape, plus the
                 // implicit "tool run" prefix when the resolved launcher is uv.
                 args = $"mcp add --scope local --transport stdio UnityMCP -- \"{uvxPath}\" {uvxLaunchArgs}";
             }
@@ -1000,7 +1000,7 @@ namespace MCPForUnity.Editor.Clients
                 }
 
                 // Use the centralized launch-arg builder so we keep the same shape
-                // (native-tls / dev-flags / --prerelease / --from / package) AND pick up
+                // (system-certs / dev-flags / --prerelease / --from / package) AND pick up
                 // the implicit "tool run" prefix when PathResolver lands on uv instead
                 // of uvx. Manual string-splicing of `--from` here previously dropped that
                 // prefix, breaking Claude Code stdio registration on uv.exe-only hosts.

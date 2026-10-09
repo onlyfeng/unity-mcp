@@ -331,26 +331,59 @@ namespace MCPForUnity.Editor.Helpers
             "NODE_EXTRA_CA_CERTS",
         };
 
+        private static string _systemCertsFlagUvxPath;
+        private static string _systemCertsFlag;
+
         /// <summary>
-        /// Emits <c>--native-tls</c> rather than its newer name <c>--system-certs</c>: current uv
-        /// still accepts the old name, while uv builds that predate the rename reject the new one.
+        /// Returns the uv flag that makes it trust the OS certificate store, or nothing.
         /// <see cref="EditorPrefKeys.UseSystemCertificates"/> forces it on or off for proxies whose
         /// CA lives only in the OS trust store, where no environment variable gives it away.
         /// </summary>
-        private static IReadOnlyList<string> GetNativeTlsArgs()
+        private static IReadOnlyList<string> GetSystemCertsArgs(string uvxPath)
         {
             string mode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, "auto");
-            if (string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase))
-                return new[] { "--native-tls" };
-            if (string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
+            bool enabled = string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase);
+            if (!enabled && !string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (string name in CorporateCaEnvVars)
+                {
+                    if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
+                    {
+                        enabled = true;
+                        break;
+                    }
+                }
+            }
+            if (!enabled)
                 return Array.Empty<string>();
 
-            foreach (string name in CorporateCaEnvVars)
+            if (_systemCertsFlag == null || _systemCertsFlagUvxPath != uvxPath)
             {
-                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))
-                    return new[] { "--native-tls" };
+                MCPServiceLocator.Paths.TryValidateUvxExecutable(uvxPath, out string version);
+                _systemCertsFlag = SelectSystemCertsFlag(version);
+                _systemCertsFlagUvxPath = uvxPath;
             }
-            return Array.Empty<string>();
+            return new[] { _systemCertsFlag };
+        }
+
+        /// <summary>
+        /// uv 0.11 renamed <c>--native-tls</c> to <c>--system-certs</c>; the old name is deprecated
+        /// but behaves identically. Emit <c>--system-certs</c> wherever it exists, so configs written
+        /// by earlier builds of this package stay unchanged and survive the old name's removal, and
+        /// fall back to <c>--native-tls</c> only for uv that predates the rename. An unknown version
+        /// keeps <c>--system-certs</c>.
+        /// </summary>
+        internal static string SelectSystemCertsFlag(string uvVersion)
+        {
+            Version parsed = null;
+            if (!string.IsNullOrEmpty(uvVersion))
+            {
+                int end = 0;
+                while (end < uvVersion.Length && (char.IsDigit(uvVersion[end]) || uvVersion[end] == '.'))
+                    end++;
+                Version.TryParse(uvVersion.Substring(0, end), out parsed);
+            }
+            return parsed != null && parsed < new Version(0, 11) ? "--native-tls" : "--system-certs";
         }
 
         /// <summary>
@@ -376,11 +409,11 @@ namespace MCPForUnity.Editor.Helpers
         /// Single source of truth for uvx args used to launch the MCP for Unity server.
         /// Centralizing this here ensures every client configurator (JSON, TOML, Claude CLI,
         /// OpenCode, etc.) emits an identical command shape:
-        ///   <c>uvx[.exe] [--native-tls] [--no-cache --refresh | --offline] --prerelease explicit
+        ///   <c>uvx[.exe] [--system-certs | --native-tls] [--no-cache --refresh | --offline] --prerelease explicit
         ///   --from mcpforunityserver&gt;=0.0.0a0 mcp-for-unity [--transport stdio]</c>
         /// When PathResolver falls back to uv instead of uvx, a "tool run" prefix is
         /// inserted automatically. Per-configurator string-splicing of <c>--from</c> is
-        /// forbidden; callers must use this builder so we keep the native-tls /
+        /// forbidden; callers must use this builder so we keep the system-certs /
         /// prerelease / dev-flags ordering consistent.
         /// MUST be called from the main thread (reads EditorPrefs).
         /// </summary>
@@ -392,7 +425,7 @@ namespace MCPForUnity.Editor.Helpers
             string uvxPath = MCPServiceLocator.Paths.GetUvxPath();
             foreach (string arg in GetUvToolRunPrefixArgs(uvxPath))
                 args.Add(arg);
-            foreach (string flag in GetNativeTlsArgs())
+            foreach (string flag in GetSystemCertsArgs(uvxPath))
                 args.Add(flag);
             foreach (string flag in GetUvxDevFlagsList())
                 args.Add(flag);

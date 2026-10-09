@@ -24,8 +24,9 @@ namespace MCPForUnity.Editor.Constants
         internal const string ClientProjectDirOverride = "MCPForUnity.ClientProjectDir";
 
         /// <summary>
-        /// Overrides whether emitted uvx commands include <c>--native-tls</c>: "always", "never",
-        /// or anything else (default) to auto-detect a corporate CA from the environment.
+        /// Overrides whether emitted uvx commands include <c>--system-certs</c> (<c>--native-tls</c> on
+        /// uv older than 0.11): "always", "never", or anything else (default) to auto-detect a
+        /// corporate CA from the environment.
         /// </summary>
         internal const string UseSystemCertificates = "MCPForUnity.UseSystemCertificates";
 

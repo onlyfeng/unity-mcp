@@ -41,42 +41,57 @@ namespace MCPForUnityTests.Editor.Helpers
                 EditorPrefs.DeleteKey(EditorPrefKeys.UseSystemCertificates);
         }
 
-        [Test]
-        public void BuildUvxServerLaunchArgs_OmitsNativeTls_WithoutCorporateCa()
+        private static bool HasSystemCertsFlag(IList<string> args)
         {
-            CollectionAssert.DoesNotContain(
-                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
+            return args.Contains("--system-certs") || args.Contains("--native-tls");
         }
 
         [Test]
-        public void BuildUvxServerLaunchArgs_AddsNativeTls_BehindCorporateCa()
+        public void BuildUvxServerLaunchArgs_OmitsSystemCerts_WithoutCorporateCa()
+        {
+            Assert.IsFalse(HasSystemCertsFlag(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false)));
+        }
+
+        [Test]
+        public void BuildUvxServerLaunchArgs_AddsSystemCerts_BehindCorporateCa()
         {
             Environment.SetEnvironmentVariable("REQUESTS_CA_BUNDLE", "/etc/corp-ca.pem");
 
-            var args = AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false);
-
-            CollectionAssert.Contains(args, "--native-tls");
-            // uv builds that predate the --system-certs rename reject it outright.
-            CollectionAssert.DoesNotContain(args, "--system-certs");
+            Assert.IsTrue(HasSystemCertsFlag(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false)));
         }
 
         [Test]
-        public void BuildUvxServerLaunchArgs_AlwaysOverride_AddsNativeTlsWithoutCorporateCa()
+        public void BuildUvxServerLaunchArgs_AlwaysOverride_AddsSystemCertsWithoutCorporateCa()
         {
             EditorPrefs.SetString(EditorPrefKeys.UseSystemCertificates, "always");
 
-            CollectionAssert.Contains(
-                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
+            Assert.IsTrue(HasSystemCertsFlag(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false)));
         }
 
         [Test]
-        public void BuildUvxServerLaunchArgs_NeverOverride_OmitsNativeTlsBehindCorporateCa()
+        public void BuildUvxServerLaunchArgs_NeverOverride_OmitsSystemCertsBehindCorporateCa()
         {
             EditorPrefs.SetString(EditorPrefKeys.UseSystemCertificates, "never");
             Environment.SetEnvironmentVariable("REQUESTS_CA_BUNDLE", "/etc/corp-ca.pem");
 
-            CollectionAssert.DoesNotContain(
-                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
+            Assert.IsFalse(HasSystemCertsFlag(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false)));
+        }
+
+        // uv 0.11 renamed --native-tls to --system-certs; older uv rejects the new name.
+        [TestCase("0.9.18", "--native-tls")]
+        [TestCase("0.10.12", "--native-tls")]
+        [TestCase("0.11.0", "--system-certs")]
+        [TestCase("0.12.19", "--system-certs")]
+        // Unknown versions keep --system-certs, which earlier builds always emitted.
+        [TestCase(null, "--system-certs")]
+        [TestCase("not-a-version", "--system-certs")]
+        public void SelectSystemCertsFlag_PicksFlagByUvVersion(string uvVersion, string expected)
+        {
+            Assert.AreEqual(expected, AssetPathUtility.SelectSystemCertsFlag(uvVersion));
         }
 
         [TestCase("mcp-for-unity", "mcp-for-unity")]

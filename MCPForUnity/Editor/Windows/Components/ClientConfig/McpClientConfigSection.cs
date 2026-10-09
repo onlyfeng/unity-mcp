@@ -405,7 +405,7 @@ namespace MCPForUnity.Editor.Windows.Components.ClientConfig
 
             // Capture ALL main-thread-only values before async task. The full launch-arg
             // string is built here so the background register call picks up the centralized
-            // shape: native-tls / dev-flags / --prerelease / --from / package, plus the
+            // shape: system-certs / dev-flags / --prerelease / --from / package, plus the
             // implicit "tool run" prefix when PathResolver landed on uv.* rather than uvx.*.
             string projectDir = ClaudeCliMcpConfigurator.GetClientProjectDir();
             bool useHttpTransport = EditorConfigurationCache.Instance.UseHttpTransport;
