@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using MCPForUnity.Editor.Constants;
 using MCPForUnity.Editor.Helpers;
 using NUnit.Framework;
+using UnityEditor;
 
 namespace MCPForUnityTests.Editor.Helpers
 {
@@ -12,10 +14,15 @@ namespace MCPForUnityTests.Editor.Helpers
             { "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS" };
 
         private readonly Dictionary<string, string> _savedEnv = new();
+        private bool _hadCertMode;
+        private string _savedCertMode;
 
         [SetUp]
         public void SetUp()
         {
+            _hadCertMode = EditorPrefs.HasKey(EditorPrefKeys.UseSystemCertificates);
+            _savedCertMode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, string.Empty);
+            EditorPrefs.DeleteKey(EditorPrefKeys.UseSystemCertificates);
             foreach (string name in CorporateCaEnvVars)
             {
                 _savedEnv[name] = Environment.GetEnvironmentVariable(name);
@@ -28,6 +35,10 @@ namespace MCPForUnityTests.Editor.Helpers
         {
             foreach (var entry in _savedEnv)
                 Environment.SetEnvironmentVariable(entry.Key, entry.Value);
+            if (_hadCertMode)
+                EditorPrefs.SetString(EditorPrefKeys.UseSystemCertificates, _savedCertMode);
+            else
+                EditorPrefs.DeleteKey(EditorPrefKeys.UseSystemCertificates);
         }
 
         [Test]
@@ -47,6 +58,25 @@ namespace MCPForUnityTests.Editor.Helpers
             CollectionAssert.Contains(args, "--native-tls");
             // uv builds that predate the --system-certs rename reject it outright.
             CollectionAssert.DoesNotContain(args, "--system-certs");
+        }
+
+        [Test]
+        public void BuildUvxServerLaunchArgs_AlwaysOverride_AddsNativeTlsWithoutCorporateCa()
+        {
+            EditorPrefs.SetString(EditorPrefKeys.UseSystemCertificates, "always");
+
+            CollectionAssert.Contains(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
+        }
+
+        [Test]
+        public void BuildUvxServerLaunchArgs_NeverOverride_OmitsNativeTlsBehindCorporateCa()
+        {
+            EditorPrefs.SetString(EditorPrefKeys.UseSystemCertificates, "never");
+            Environment.SetEnvironmentVariable("REQUESTS_CA_BUNDLE", "/etc/corp-ca.pem");
+
+            CollectionAssert.DoesNotContain(
+                AssetPathUtility.BuildUvxServerLaunchArgs("mcp-for-unity", includeTransportStdio: false), "--native-tls");
         }
 
         [TestCase("mcp-for-unity", "mcp-for-unity")]

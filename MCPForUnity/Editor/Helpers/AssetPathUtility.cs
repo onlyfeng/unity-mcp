@@ -334,9 +334,17 @@ namespace MCPForUnity.Editor.Helpers
         /// <summary>
         /// Emits <c>--native-tls</c> rather than its newer name <c>--system-certs</c>: current uv
         /// still accepts the old name, while uv builds that predate the rename reject the new one.
+        /// <see cref="EditorPrefKeys.UseSystemCertificates"/> forces it on or off for proxies whose
+        /// CA lives only in the OS trust store, where no environment variable gives it away.
         /// </summary>
         private static IReadOnlyList<string> GetNativeTlsArgs()
         {
+            string mode = EditorPrefs.GetString(EditorPrefKeys.UseSystemCertificates, "auto");
+            if (string.Equals(mode, "always", StringComparison.OrdinalIgnoreCase))
+                return new[] { "--native-tls" };
+            if (string.Equals(mode, "never", StringComparison.OrdinalIgnoreCase))
+                return Array.Empty<string>();
+
             foreach (string name in CorporateCaEnvVars)
             {
                 if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable(name)))

@@ -23,6 +23,12 @@ namespace MCPForUnity.Editor.Constants
         internal const string ClaudeCliPathOverride = "MCPForUnity.ClaudeCliPath";
         internal const string ClientProjectDirOverride = "MCPForUnity.ClientProjectDir";
 
+        /// <summary>
+        /// Overrides whether emitted uvx commands include <c>--native-tls</c>: "always", "never",
+        /// or anything else (default) to auto-detect a corporate CA from the environment.
+        /// </summary>
+        internal const string UseSystemCertificates = "MCPForUnity.UseSystemCertificates";
+
         internal const string HttpBaseUrl = "MCPForUnity.HttpUrl";
         internal const string HttpRemoteBaseUrl = "MCPForUnity.HttpRemoteUrl";
         internal const string SessionId = "MCPForUnity.SessionId";
