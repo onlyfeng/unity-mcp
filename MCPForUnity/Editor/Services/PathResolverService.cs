@@ -84,12 +84,19 @@ namespace MCPForUnity.Editor.Services
 
                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 {
-                    if (!_pyenvUvxResolved)
+                    if (!_windowsShimFallbackResolved)
                     {
-                        _pyenvUvxPath = ResolveUvxBehindPyenvShim(GetPyenvWinRoot());
-                        _pyenvUvxResolved = true;
+                        string pyenvRoot = GetPyenvWinRoot();
+                        var shimDirs = (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                            .Split(Path.PathSeparator)
+                            .Select(dir => dir.Trim())
+                            .Where(dir => dir.Length > 0)
+                            .ToList();
+                        shimDirs.Add(Path.Combine(pyenvRoot, "shims"));
+                        _windowsShimFallback = ResolveUvxBehindPyenvShim(pyenvRoot) ?? FindUvShim(shimDirs);
+                        _windowsShimFallbackResolved = true;
                     }
-                    return _pyenvUvxPath;
+                    return _windowsShimFallback;
                 }
             }
             catch (Exception ex)
@@ -100,9 +107,9 @@ namespace MCPForUnity.Editor.Services
             return null;
         }
 
-        // pyenv-win is slow to start, so its answer is cached for the domain.
-        private static bool _pyenvUvxResolved;
-        private static string _pyenvUvxPath;
+        // pyenv-win is slow to start, so the Windows shim fallback is resolved once per domain.
+        private static bool _windowsShimFallbackResolved;
+        private static string _windowsShimFallback;
 
         private static string GetPyenvWinRoot()
         {
@@ -143,6 +150,25 @@ namespace MCPForUnity.Editor.Services
                 }
             }
 
+            return null;
+        }
+
+        /// <summary>
+        /// Returns the first uv .bat/.cmd shim in <paramref name="searchDirs"/>. Surfacing the shim,
+        /// rather than the bare "uvx" fallback, lets stdio configurators reject it with a clear
+        /// message instead of persisting a command the MCP client would run through cmd.exe.
+        /// </summary>
+        internal static string FindUvShim(IReadOnlyList<string> searchDirs)
+        {
+            foreach (string name in new[] { "uvx.bat", "uvx.cmd", "uv.bat", "uv.cmd" })
+            {
+                foreach (string dir in searchDirs)
+                {
+                    string candidate = Path.Combine(dir, name);
+                    if (File.Exists(candidate))
+                        return candidate;
+                }
+            }
             return null;
         }
 

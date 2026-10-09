@@ -993,10 +993,10 @@ namespace MCPForUnity.Editor.Clients
                 var (uvxPath, _, packageName) = AssetPathUtility.GetUvxCommandParts();
                 // This synchronous Register() path is reachable from non-UI flows too
                 // (CheckStatus auto-rewrite, migration), so the check cannot live only in the UI.
-                string shimError = McpConfigurationHelper.GetStdioShimError(uvxPath, useStdio: true);
-                if (!string.IsNullOrEmpty(shimError))
+                string launcherError = McpConfigurationHelper.GetStdioLauncherError(uvxPath, useStdio: true);
+                if (!string.IsNullOrEmpty(launcherError))
                 {
-                    throw new InvalidOperationException(shimError);
+                    throw new InvalidOperationException(launcherError);
                 }
 
                 // Use the centralized launch-arg builder so we keep the same shape

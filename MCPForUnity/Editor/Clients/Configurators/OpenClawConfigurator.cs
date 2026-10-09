@@ -106,10 +106,10 @@ namespace MCPForUnity.Editor.Clients.Configurators
 
             // Checked in the write path only, not in BuildUnityServerEntry, which also
             // backs GetManualSnippet for copy-only flows.
-            string shimError = McpConfigurationHelper.GetStdioShimError();
-            if (!string.IsNullOrEmpty(shimError))
+            string launcherError = McpConfigurationHelper.GetStdioLauncherError();
+            if (!string.IsNullOrEmpty(launcherError))
             {
-                client.SetStatus(McpStatus.Error, shimError);
+                client.SetStatus(McpStatus.Error, launcherError);
                 return;
             }
 

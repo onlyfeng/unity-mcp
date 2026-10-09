@@ -101,9 +101,9 @@ namespace MCPForUnity.Editor.Helpers
 
             bool clientSupportsHttp = mcpClient?.SupportsHttpTransport != false;
             bool willWriteStdio = !(clientSupportsHttp && EditorConfigurationCache.Instance.UseHttpTransport);
-            string shimError = GetStdioShimError(uvxPath, willWriteStdio);
-            if (!string.IsNullOrEmpty(shimError))
-                return shimError;
+            string launcherError = GetStdioLauncherError(uvxPath, willWriteStdio);
+            if (!string.IsNullOrEmpty(launcherError))
+                return launcherError;
 
             // Ensure containers exist and write back configuration
             JObject existingRoot;
@@ -161,10 +161,10 @@ namespace MCPForUnity.Editor.Helpers
                 return "uv package manager not found. Please install uv first.";
             }
 
-            string shimError = GetStdioShimError(
+            string launcherError = GetStdioLauncherError(
                 uvxPath, HttpEndpointUtility.GetCurrentServerTransport() == ConfiguredTransport.Stdio);
-            if (!string.IsNullOrEmpty(shimError))
-                return shimError;
+            if (!string.IsNullOrEmpty(launcherError))
+                return launcherError;
 
             string updatedToml = CodexConfigHelper.UpsertCodexServerBlock(existingToml, uvxPath);
 
@@ -244,22 +244,26 @@ namespace MCPForUnity.Editor.Helpers
         /// Convenience overload that resolves uvx and infers whether we'll write stdio from
         /// the current HTTP/stdio transport preference.
         /// </summary>
-        public static string GetStdioShimError()
+        public static string GetStdioLauncherError()
         {
-            return GetStdioShimError(
+            return GetStdioLauncherError(
                 MCPServiceLocator.Paths.GetUvxPath(),
                 HttpEndpointUtility.GetCurrentServerTransport() == ConfiguredTransport.Stdio);
         }
 
         /// <summary>
-        /// Returns an error message when a stdio client config would launch the server through
-        /// a Windows .bat/.cmd shim (e.g. a uvx path override pointing at pyenv-win's uvx.bat),
-        /// or null when the config is safe to write. Callers should refuse to write the config
-        /// and surface the message. Always null for HTTP, which has no launch command.
+        /// Returns an error message when a stdio client config has no uvx to launch (an invalid
+        /// override with no system fallback) or would launch the server through a Windows .bat/.cmd
+        /// shim, or null when the config is safe to write. Callers should refuse to write the
+        /// config and surface the message. Always null for HTTP, which has no launch command.
         /// </summary>
-        public static string GetStdioShimError(string uvxPath, bool useStdio)
+        public static string GetStdioLauncherError(string uvxPath, bool useStdio)
         {
-            if (!useStdio || !IsWindowsShellShimCommand(uvxPath))
+            if (!useStdio)
+                return null;
+            if (string.IsNullOrWhiteSpace(uvxPath))
+                return "uv package manager not found. Please install uv first.";
+            if (!IsWindowsShellShimCommand(uvxPath))
                 return null;
 
             return "Refusing to write Unity MCP stdio config with a Windows batch shim. " +

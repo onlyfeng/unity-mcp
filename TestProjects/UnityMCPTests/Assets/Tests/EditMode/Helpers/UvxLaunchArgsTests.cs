@@ -64,9 +64,9 @@ namespace MCPForUnityTests.Editor.Helpers
         }
 
         [Test]
-        public void GetStdioShimError_FlagsBatchShimsOnWindows()
+        public void GetStdioLauncherError_FlagsBatchShimsOnWindows()
         {
-            string error = McpConfigurationHelper.GetStdioShimError(@"C:\pyenv\shims\uvx.bat", useStdio: true);
+            string error = McpConfigurationHelper.GetStdioLauncherError(@"C:\pyenv\shims\uvx.bat", useStdio: true);
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                 StringAssert.Contains("uvx.bat", error);
@@ -74,17 +74,25 @@ namespace MCPForUnityTests.Editor.Helpers
                 Assert.IsNull(error);
         }
 
-        [Test]
-        public void GetStdioShimError_IgnoresHttpTransport()
+        [TestCase(null)]
+        [TestCase("")]
+        public void GetStdioLauncherError_RejectsMissingUvx(string uvxPath)
         {
-            Assert.IsNull(McpConfigurationHelper.GetStdioShimError(@"C:\pyenv\shims\uvx.bat", useStdio: false));
+            StringAssert.Contains("uv package manager not found", McpConfigurationHelper.GetStdioLauncherError(uvxPath, useStdio: true));
+            Assert.IsNull(McpConfigurationHelper.GetStdioLauncherError(uvxPath, useStdio: false));
         }
 
         [Test]
-        public void GetStdioShimError_AllowsRealExecutables()
+        public void GetStdioLauncherError_IgnoresHttpTransport()
         {
-            Assert.IsNull(McpConfigurationHelper.GetStdioShimError(@"C:\Users\me\.local\bin\uvx.exe", useStdio: true));
-            Assert.IsNull(McpConfigurationHelper.GetStdioShimError("/usr/local/bin/uvx", useStdio: true));
+            Assert.IsNull(McpConfigurationHelper.GetStdioLauncherError(@"C:\pyenv\shims\uvx.bat", useStdio: false));
+        }
+
+        [Test]
+        public void GetStdioLauncherError_AllowsRealExecutables()
+        {
+            Assert.IsNull(McpConfigurationHelper.GetStdioLauncherError(@"C:\Users\me\.local\bin\uvx.exe", useStdio: true));
+            Assert.IsNull(McpConfigurationHelper.GetStdioLauncherError("/usr/local/bin/uvx", useStdio: true));
         }
     }
 }

@@ -75,6 +75,26 @@ namespace MCPForUnityTests.Editor
             Assert.IsNull(PathResolverService.ResolveUvxBehindPyenvShim(_pyenvRoot));
         }
 
+        [Test]
+        public void FindUvShim_PrefersUvxAndSearchesInOrder()
+        {
+            string first = Path.Combine(_pyenvRoot, "first");
+            string second = Path.Combine(_pyenvRoot, "second");
+            Directory.CreateDirectory(first);
+            Directory.CreateDirectory(second);
+            File.WriteAllText(Path.Combine(first, "uv.cmd"), string.Empty);
+            string uvx = Path.Combine(second, "uvx.bat");
+            File.WriteAllText(uvx, string.Empty);
+
+            Assert.AreEqual(uvx, PathResolverService.FindUvShim(new[] { first, second }));
+        }
+
+        [Test]
+        public void FindUvShim_ReturnsNull_WhenNoShim()
+        {
+            Assert.IsNull(PathResolverService.FindUvShim(new[] { _pyenvRoot }));
+        }
+
         private void WriteShim(string command)
         {
             File.WriteAllText(Path.Combine(_pyenvRoot, "shims", command + ".bat"), "@echo off\r\n");
